@@ -61,6 +61,35 @@ const generateInvoices = () => {
   return data.sort((a, b) => new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0));
 };
 
+// ── Real Time Invoice Sample Data (breakdown by transaction type) ──
+const generateRealtimeInvoices = () => {
+  const txTypes = {
+    sub3: [{channel:"Subscription Fee",count:820,amount:41000},{channel:"Renewal Fee",count:340,amount:17000},{channel:"Upgrade Fee",count:150,amount:12000}],
+    sub2: [{channel:"Subscription Fee",count:1200,amount:60000},{channel:"Upgrade Fee",count:280,amount:22400}],
+    sub4: [{channel:"Subscription Fee",count:560,amount:28000},{channel:"Renewal Fee",count:210,amount:10500},{channel:"Upgrade Fee",count:95,amount:7600},{channel:"MID Fee",count:12,amount:1800}],
+    sub2b: [{channel:"Renewal Fee",count:900,amount:45000},{channel:"Subscription Fee",count:650,amount:32500}],
+    sub3b: [{channel:"Subscription Fee",count:1500,amount:75000},{channel:"Renewal Fee",count:480,amount:24000},{channel:"Tokenization Fee",count:8,amount:2400}],
+    sub2c: [{channel:"Upgrade Fee",count:420,amount:33600},{channel:"Subscription Fee",count:380,amount:19000}],
+    sub3c: [{channel:"Subscription Fee",count:700,amount:35000},{channel:"Renewal Fee",count:300,amount:15000},{channel:"MID Fee",count:18,amount:2700}],
+    sub2d: [{channel:"Subscription Fee",count:1100,amount:55000},{channel:"Renewal Fee",count:550,amount:27500}],
+  };
+  const data = [
+    { id:"71234501", biz:"TechServ Malaysia", bus:"BUS-401-71234501", brand:"TechServ Pro", clint:"CLINT-401-10000001", period:"February 2026", pMonth:"February", pYear:"2026", amount:70000, status:"Submitted", submittedDate:"2026-02-05T09:00:00", lastUpdated:"2026-02-05T09:30:00", updatedBy:"Amir@acme.com", chargeBreakdown:txTypes.sub3, timeline:[{date:"5 February 2026, 09:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234502", biz:"CloudHost Sdn Bhd", bus:"BUS-402-71234502", brand:"CloudHost", clint:"CLINT-402-10000002", period:"February 2026", pMonth:"February", pYear:"2026", amount:82400, status:"Cleared", submittedDate:"2026-01-30T14:00:00", lastUpdated:"2026-02-03T10:00:00", updatedBy:"Farah@acme.com", chargeBreakdown:txTypes.sub2, timeline:[{date:"3 February 2026, 10:00 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN"},{date:"30 January 2026, 14:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234503", biz:"SaaS Global MY", bus:"BUS-403-71234503", brand:"SaaS Platform", clint:"CLINT-403-10000003", period:"January 2026", pMonth:"January", pYear:"2026", amount:47900, status:"Rejected", submittedDate:"2026-02-10T16:00:00", lastUpdated:"2026-02-10T16:00:00", updatedBy:"Rizal@acme.com", chargeBreakdown:txTypes.sub4, timeline:[{date:"10 February 2026, 16:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN"},{date:"8 February 2026, 09:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234504", biz:"PayNet Solutions", bus:"BUS-404-71234504", brand:"PayNet Gateway", clint:"CLINT-404-10000004", period:"January 2026", pMonth:"January", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-02-01T11:00:00", updatedBy:"Hafiz@acme.com", chargeBreakdown:txTypes.sub2b, timeline:[{date:"1 February 2026, 11:00 (GMT+8)",status:"Failed to Calculate",desc:"Calculation error occurred"}] },
+    { id:"71234505", biz:"FinEdge Corp", bus:"BUS-405-71234505", brand:"FinEdge Suite", clint:"CLINT-405-10000005", period:"February 2026", pMonth:"February", pYear:"2026", amount:101400, status:"Canceled", submittedDate:"2026-02-08T08:00:00", lastUpdated:"2026-02-09T14:00:00", updatedBy:"Lina@acme.com", chargeBreakdown:txTypes.sub3b, timeline:[{date:"9 February 2026, 14:00 (GMT+8)",status:"Canceled",desc:"e-Invoice canceled by user"},{date:"8 February 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234506", biz:"DataVault MY", bus:"BUS-406-71234506", brand:"DataVault", clint:"CLINT-406-10000006", period:"December 2025", pMonth:"December", pYear:"2025", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:null, updatedBy:"", chargeBreakdown:txTypes.sub2c, timeline:[{date:"20 December 2025, 10:00 (GMT+8)",status:"Calculation Initiated",desc:"Calculation initiated"}] },
+    { id:"71234507", biz:"MerchantPay", bus:"BUS-407-71234507", brand:"MerchantPay Pro", clint:"CLINT-407-10000007", period:"November 2025", pMonth:"November", pYear:"2025", amount:52700, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-01-22T13:00:00", updatedBy:"Zaki@acme.com", chargeBreakdown:txTypes.sub3c, timeline:[{date:"22 January 2026, 13:00 (GMT+8)",status:"Failed to Submit",desc:"e-Invoice failed to send to Taxilla"}] },
+    { id:"71234508", biz:"Infinity Digital", bus:"BUS-408-71234508", brand:"Infinity Platform", clint:"CLINT-408-10000008", period:"December 2025", pMonth:"December", pYear:"2025", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-01-25T09:00:00", updatedBy:"Nurul@acme.com", chargeBreakdown:txTypes.sub2d, timeline:[{date:"25 January 2026, 09:00 (GMT+8)",status:"Failed to Calculate",desc:"Calculation error occurred"}] },
+    { id:"71234509", biz:"eKedai Systems", bus:"BUS-409-71234509", brand:"eKedai POS", clint:"CLINT-409-10000009", period:"January 2026", pMonth:"January", pYear:"2026", amount:77500, status:"Submitted", submittedDate:"2026-03-02T08:00:00", lastUpdated:"2026-03-02T08:00:00", updatedBy:"Syafiq@acme.com", chargeBreakdown:txTypes.sub2b, timeline:[{date:"2 March 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234510", biz:"NetPay Malaysia", bus:"BUS-410-71234510", brand:"NetPay Hub", clint:"CLINT-410-10000010", period:"February 2026", pMonth:"February", pYear:"2026", amount:52600, status:"Cleared", submittedDate:"2026-01-29T11:00:00", lastUpdated:"2026-02-04T16:00:00", updatedBy:"Aishah@acme.com", chargeBreakdown:txTypes.sub2c, timeline:[{date:"4 February 2026, 16:00 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN"},{date:"29 January 2026, 11:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+    { id:"71234511", biz:"BizCloud MY", bus:"BUS-411-71234511", brand:"BizCloud ERP", clint:"CLINT-411-10000011", period:"January 2026", pMonth:"January", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:null, updatedBy:"", chargeBreakdown:txTypes.sub3, timeline:[{date:"12 January 2026, 09:00 (GMT+8)",status:"Calculation Initiated",desc:"Calculation initiated"}] },
+    { id:"71234512", biz:"Vendora Tech", bus:"BUS-412-71234512", brand:"Vendora Suite", clint:"CLINT-412-10000012", period:"November 2025", pMonth:"November", pYear:"2025", amount:82500, status:"Submitted", submittedDate:"2026-03-05T10:00:00", lastUpdated:"2026-03-05T10:00:00", updatedBy:"Danish@acme.com", chargeBreakdown:txTypes.sub2d, timeline:[{date:"5 March 2026, 10:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+  ];
+  return data.sort((a, b) => new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0));
+};
+
 // ── Helpers ──
 const fmtCurrency = (v) => v == null ? "-" : v.toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtDatetime = (iso) => { if(!iso) return "-"; const d=new Date(iso); const day=d.getDate(); const ms=["January","February","March","April","May","June","July","August","September","October","November","December"]; return `${day} ${ms[d.getMonth()]} ${d.getFullYear()}, ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
@@ -141,7 +170,7 @@ function DocThumbnail({invoice}) {
 }
 
 // ── Detail Modal ──
-function DetailModal({invoice,onClose,onAction}) {
+function DetailModal({invoice,onClose,onAction,mode}) {
   if(!invoice) return null;
   const s=invoice.status;
   const showDoc=["Submitted","Cleared","Rejected","Failed to Submit","Canceled"].includes(s);
@@ -188,7 +217,7 @@ function DetailModal({invoice,onClose,onAction}) {
         </div>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:"#f8fafc"}}>
-            <th style={{textAlign:"left",padding:"8px 12px",fontWeight:600,color:"#374151",borderBottom:"2px solid #e5e7eb",fontSize:12}}>Payment Channel</th>
+            <th style={{textAlign:"left",padding:"8px 12px",fontWeight:600,color:"#374151",borderBottom:"2px solid #e5e7eb",fontSize:12}}>{mode==="realtime"?"Transaction Type":"Payment Channel"}</th>
             <th style={{textAlign:"right",padding:"8px 12px",fontWeight:600,color:"#374151",borderBottom:"2px solid #e5e7eb",fontSize:12}}>Total Transaction</th>
             <th style={{textAlign:"right",padding:"8px 12px",fontWeight:600,color:"#374151",borderBottom:"2px solid #e5e7eb",fontSize:12}}>Amount Charged</th>
           </tr></thead>
@@ -280,9 +309,9 @@ function ConfirmDialog({open,onClose,onConfirm,title,children,confirmLabel,showT
   </Modal>;
 }
 
-// ── Main App (inner) ──
-function LHDNApp() {
-  const [invoices,setInvoices]=useState(generateInvoices);
+// ── Invoice Content (reusable for both pages) ──
+function InvoiceContent({pageTitle,pageSubtitle,notify,mode}) {
+  const [invoices,setInvoices]=useState(()=>mode==="realtime"?generateRealtimeInvoices():generateInvoices());
   const [page,setPage]=useState(1);
   const [perPage,setPerPage]=useState(10);
   const [filterModalOpen,setFilterModalOpen]=useState(false);
@@ -294,14 +323,10 @@ function LHDNApp() {
   const [quickStatus,setQuickStatus]=useState("");
   const [selected,setSelected]=useState(new Set());
   const [selectedStatus,setSelectedStatus]=useState(null);
-  const [notifications,setNotifications]=useState([]);
   const [detailInvoice,setDetailInvoice]=useState(null);
   const [confirmModal,setConfirmModal]=useState({open:false,title:"",content:null,onConfirm:null,confirmLabel:"",showTable:false});
-  const [monitoringOpen,setMonitoringOpen]=useState(true);
   const [sortCol,setSortCol]=useState(null);
   const [sortDir,setSortDir]=useState("asc");
-
-  const notify=useCallback((type,message)=>{const id=Date.now()+Math.random();setNotifications(p=>[...p,{id,type,message}]);setTimeout(()=>setNotifications(p=>p.filter(n=>n.id!==id)),4000)},[]);
 
   const activeChips=useMemo(()=>{
     const c=[];
@@ -474,55 +499,12 @@ function LHDNApp() {
     </span>;
   };
 
-  return <div style={{display:"flex",height:"100vh",fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",background:"#f5f5f5",overflow:"hidden"}}>
-    <style>{`
-      @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
-      @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-      *{box-sizing:border-box;margin:0;padding:0}
-      ::-webkit-scrollbar{width:5px;height:5px}
-      ::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px}
-      select,input,button{font-family:inherit}
-    `}</style>
-    <Notifications items={notifications} onDismiss={id=>setNotifications(p=>p.filter(n=>n.id!==id))}/>
-
-    {/* ── Sidebar ── */}
-    <div style={{width:250,background:"#fff",borderRight:"1px solid #e5e7eb",display:"flex",flexDirection:"column",flexShrink:0}}>
-      <div style={{padding:"14px 20px",borderBottom:"1px solid #f3f4f6",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{width:36,height:36,background:"#dc2626",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:800,fontSize:13}}>RU</div>
-        <span style={{cursor:"pointer",fontSize:20,color:"#6b7280"}}>☰</span>
-      </div>
-      <div style={{padding:"12px 20px",borderBottom:"1px solid #f3f4f6"}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <div style={{width:28,height:28,borderRadius:999,background:"#fee2e2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#dc2626"}}>A</div>
-          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>ACME</div><div style={{fontSize:11,color:"#9ca3af"}}>Internal Dashboard 📋</div></div>
-          <span style={{color:"#9ca3af",fontSize:14,cursor:"pointer"}}>▾</span>
-        </div>
-      </div>
-      <div style={{padding:"8px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid #f3f4f6"}}>
-        <span style={{fontSize:12,color:"#6b7280",border:"1px solid #e5e7eb",borderRadius:4,padding:"3px 10px"}}>English</span>
-        <span style={{cursor:"pointer",fontSize:16}}>🔔</span>
-      </div>
-      <nav style={{flex:1,padding:"8px 0",overflowY:"auto"}}>
-        <div style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",fontSize:13,color:"#6b7280"}}><span>🏠</span>Dashboard</div>
-        <div>
-          <div onClick={()=>setMonitoringOpen(!monitoringOpen)} style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",fontSize:13,color:"#dc2626",fontWeight:600}}>
-            <span style={{width:22,height:22,background:"#fee2e2",borderRadius:4,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:11}}>📊</span>Monitoring
-          </div>
-          {monitoringOpen&&<div style={{paddingLeft:48}}><div style={{padding:"9px 16px",fontSize:13,color:"#dc2626",fontWeight:600,cursor:"pointer",borderLeft:"3px solid #dc2626",background:"#fef2f2",borderRadius:"0 4px 4px 0"}}>e-Invoice</div></div>}
-        </div>
-      </nav>
-      <div style={{padding:"14px 20px",borderTop:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>John Doe</div><div style={{fontSize:11,color:"#9ca3af"}}>ACME FinOps</div></div>
-        <span style={{cursor:"pointer",fontSize:16,color:"#9ca3af"}}>⚙️</span>
-      </div>
-    </div>
-
-    {/* ── Main Content ── */}
+  return <>
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{flex:1,overflow:"auto"}}>
         <div style={{padding:"28px 32px 0",background:"#fff"}}>
-          <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:4}}>e-Invoice</h1>
-          <p style={{fontSize:13,color:"#9ca3af",marginBottom:24}}>Monitor e-Invoice submission here</p>
+          <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:4}}>{pageTitle}</h1>
+          <p style={{fontSize:13,color:"#9ca3af",marginBottom:24}}>{pageSubtitle}</p>
 
           {/* Quick Filter Bar */}
           <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
@@ -541,22 +523,16 @@ function LHDNApp() {
             <button onClick={()=>setFilterModalOpen(true)} style={{display:"flex",alignItems:"center",gap:6,padding:"9px 18px",border:"1px solid #d1d5db",borderRadius:6,background:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Filter <span style={{fontSize:11,color:"#9ca3af"}}>▼</span></button>
             {activeChips.length>0&&<span onClick={resetAllFilters} style={{color:"#dc2626",cursor:"pointer",fontSize:13,fontWeight:500,whiteSpace:"nowrap"}}>Reset Filter</span>}
           </div>
-
-          {/* Chips */}
           {activeChips.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:14}}>
             {activeChips.map(chip=><span key={chip.key} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",borderRadius:999,background:"#f3f4f6",fontSize:12,color:"#374151",border:"1px solid #e5e7eb"}}>
               {chip.label}<button onClick={()=>removeChip(chip.key)} style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:"#9ca3af",padding:0,lineHeight:1}}>✕</button>
             </span>)}
           </div>}
-
-          {/* Selection Bar */}
           {selected.size>0&&<div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
             <span style={{fontSize:13,color:"#374151",fontWeight:500}}>{selected.size} e-Invoice ID(s) selected</span>
             {bulkAction&&<button onClick={handleBulkAction} style={{padding:"8px 20px",border:"none",borderRadius:6,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>{bulkAction.label}</button>}
           </div>}
         </div>
-
-        {/* Table */}
         <div style={{padding:"0 32px 24px",background:"#fff"}}>
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13,minWidth:1200}}>
@@ -571,19 +547,15 @@ function LHDNApp() {
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Submitted Date (GMT+8)</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Last Updated (GMT+8)</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Updated By</th>
-                <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Action</th>
+                <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",position:"sticky",right:0,background:"#fff",zIndex:2,boxShadow:"-4px 0 8px rgba(0,0,0,0.04)"}}>Action</th>
               </tr></thead>
               <tbody>
                 {pageItems.length===0?<tr><td colSpan={11} style={{padding:60,textAlign:"center",color:"#9ca3af"}}>No invoices found</td></tr>
                 :pageItems.map(inv=>{
-                  const isSel=selected.has(inv.id);
-                  const isDim=isRowDim(inv);
+                  const isSel=selected.has(inv.id);const isDim=isRowDim(inv);
                   return <tr key={inv.id} style={{borderBottom:"1px solid #f3f4f6",opacity:isDim?0.35:1,background:isSel?"#fef2f2":"transparent",transition:"background 0.15s"}}
-                    onMouseEnter={e=>{if(!isSel&&!isDim)e.currentTarget.style.background="#fafafa"}}
-                    onMouseLeave={e=>{if(!isSel)e.currentTarget.style.background="transparent"}}>
-                    <td style={{padding:"16px 6px"}}>
-                      <input type="checkbox" checked={isSel} disabled={isDim} onChange={()=>handleCheckbox(inv)} style={{width:17,height:17,cursor:isDim?"not-allowed":"pointer",accentColor:"#dc2626"}}/>
-                    </td>
+                    onMouseEnter={e=>{if(!isSel&&!isDim)e.currentTarget.style.background="#fafafa"}} onMouseLeave={e=>{if(!isSel)e.currentTarget.style.background="transparent"}}>
+                    <td style={{padding:"16px 6px"}}><input type="checkbox" checked={isSel} disabled={isDim} onChange={()=>handleCheckbox(inv)} style={{width:17,height:17,cursor:isDim?"not-allowed":"pointer",accentColor:"#dc2626"}}/></td>
                     <td style={{padding:"16px 10px",fontWeight:500,color:"#111827"}}>{inv.id}</td>
                     <td style={{padding:"16px 10px"}}><div style={{color:"#111827",fontWeight:500}}>{inv.biz}</div><div style={{color:"#9ca3af",fontSize:11,marginTop:1}}>{inv.bus}</div></td>
                     <td style={{padding:"16px 10px",maxWidth:180}}><div style={{color:"#111827",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inv.brand}</div><div style={{color:"#9ca3af",fontSize:11,marginTop:1}}>{inv.clint}</div></td>
@@ -593,14 +565,11 @@ function LHDNApp() {
                     <td style={{padding:"16px 10px",color:"#6b7280",fontSize:12,whiteSpace:"nowrap"}}>{fmtDatetime(inv.submittedDate)}</td>
                     <td style={{padding:"16px 10px",color:"#6b7280",fontSize:12,whiteSpace:"nowrap"}}>{fmtDatetime(inv.lastUpdated)}</td>
                     <td style={{padding:"16px 10px",color:"#6b7280",fontSize:12}}>{inv.updatedBy||"-"}</td>
-                    <td style={{padding:"16px 10px"}}><KebabMenu invoice={inv} onAction={handleAction}/></td>
-                  </tr>;
-                })}
+                    <td style={{padding:"16px 10px",position:"sticky",right:0,background:isSel?"#fef2f2":"#fff",zIndex:1,boxShadow:"-4px 0 8px rgba(0,0,0,0.04)"}}><KebabMenu invoice={inv} onAction={handleAction}/></td>
+                  </tr>;})}
               </tbody>
             </table>
           </div>
-
-          {/* Red bottom line + Pagination */}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 0 0",borderTop:"3px solid #dc2626"}}>
             <select value={perPage} onChange={e=>setPerPage(Number(e.target.value))} style={{padding:"7px 12px",border:"1px solid #d1d5db",borderRadius:6,fontSize:13,color:"#374151",cursor:"pointer",outline:"none",appearance:"auto",background:"#fff"}}>
               {[5,10,25].map(n=><option key={n} value={n}>{n} items per page</option>)}
@@ -617,11 +586,70 @@ function LHDNApp() {
         </div>
       </div>
     </div>
-
-    {/* Modals */}
     <FilterModal open={filterModalOpen} onClose={()=>setFilterModalOpen(false)} onApply={setFilters} filters={filters}/>
-    {detailInvoice&&<DetailModal invoice={detailInvoice} onClose={()=>setDetailInvoice(null)} onAction={(a,i)=>{setDetailInvoice(null);handleAction(a,i)}}/>}
+    {detailInvoice&&<DetailModal invoice={detailInvoice} onClose={()=>setDetailInvoice(null)} onAction={(a,i)=>{setDetailInvoice(null);handleAction(a,i)}} mode={mode}/>}
     <ConfirmDialog open={confirmModal.open} onClose={()=>setConfirmModal({open:false,title:"",content:null,onConfirm:null,confirmLabel:"",showTable:false})} onConfirm={confirmModal.onConfirm} title={confirmModal.title} confirmLabel={confirmModal.confirmLabel} showTable={confirmModal.showTable}>{confirmModal.content}</ConfirmDialog>
+  </>;
+}
+
+// ── Main App (inner) — Sidebar + Page Router ──
+function LHDNApp() {
+  const [monitoringOpen,setMonitoringOpen]=useState(true);
+  const [sidebarOpen,setSidebarOpen]=useState(true);
+  const [activePage,setActivePage]=useState("monthly");
+  const [notifications,setNotifications]=useState([]);
+  const notify=useCallback((type,message)=>{const id=Date.now()+Math.random();setNotifications(p=>[...p,{id,type,message}]);setTimeout(()=>setNotifications(p=>p.filter(n=>n.id!==id)),4000)},[]);
+
+  const pages={monthly:{title:"Monthly Consolidated",subtitle:"Monitor monthly consolidated e-Invoice submission here"},realtime:{title:"Real Time Invoice",subtitle:"Monitor real-time e-Invoice submission here"}};
+  const subMenuStyle=(key)=>({padding:"9px 16px",fontSize:13,cursor:"pointer",borderRadius:"0 4px 4px 0",marginBottom:2,transition:"all 0.15s",
+    ...(activePage===key?{color:"#dc2626",fontWeight:600,borderLeft:"3px solid #dc2626",background:"#fef2f2"}:{color:"#6b7280",fontWeight:400,borderLeft:"3px solid transparent",background:"transparent"})});
+
+  return <div style={{display:"flex",height:"100vh",fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",background:"#f5f5f5",overflow:"hidden"}}>
+    <style>{`
+      @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+      @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+      *{box-sizing:border-box;margin:0;padding:0}
+      ::-webkit-scrollbar{width:5px;height:5px}
+      ::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px}
+      select,input,button{font-family:inherit}
+    `}</style>
+    <Notifications items={notifications} onDismiss={id=>setNotifications(p=>p.filter(n=>n.id!==id))}/>
+    <div style={{width:sidebarOpen?250:56,background:"#fff",borderRight:"1px solid #e5e7eb",display:"flex",flexDirection:"column",flexShrink:0,transition:"width 0.25s ease",overflow:"hidden"}}>
+      <div style={{padding:"10px",borderBottom:"1px solid #f3f4f6",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",minWidth:sidebarOpen?250:0}}>
+        {sidebarOpen&&<div style={{width:36,height:36,background:"#dc2626",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:800,fontSize:13,flexShrink:0,marginLeft:10}}>RU</div>}
+        <span onClick={()=>setSidebarOpen(!sidebarOpen)} style={{cursor:"pointer",fontSize:20,color:"#6b7280",padding:"6px 8px",borderRadius:6,border:"1px solid #e5e7eb",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",marginRight:sidebarOpen?10:0}}>☰</span>
+      </div>
+      {sidebarOpen&&<>
+      <div style={{padding:"12px 20px",borderBottom:"1px solid #f3f4f6"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:28,height:28,borderRadius:999,background:"#fee2e2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#dc2626"}}>A</div>
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>ACME</div><div style={{fontSize:11,color:"#9ca3af"}}>Internal Dashboard 📋</div></div>
+          <span style={{color:"#9ca3af",fontSize:14,cursor:"pointer"}}>▾</span>
+        </div>
+      </div>
+      <div style={{padding:"8px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid #f3f4f6"}}>
+        <span style={{fontSize:12,color:"#6b7280",border:"1px solid #e5e7eb",borderRadius:4,padding:"3px 10px"}}>English</span>
+        <span style={{cursor:"pointer",fontSize:16}}>🔔</span>
+      </div>
+      <nav style={{flex:1,padding:"8px 0",overflowY:"auto"}}>
+        <div style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",fontSize:13,color:"#6b7280"}}><span>🏠</span>Dashboard</div>
+        <div>
+          <div onClick={()=>setMonitoringOpen(!monitoringOpen)} style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",fontSize:13,color:"#dc2626",fontWeight:600}}>
+            <span style={{width:22,height:22,background:"#fee2e2",borderRadius:4,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:11}}>📊</span>Monitoring
+          </div>
+          {monitoringOpen&&<div style={{paddingLeft:48}}>
+            <div onClick={()=>setActivePage("monthly")} style={subMenuStyle("monthly")}>Monthly Consolidated</div>
+            <div onClick={()=>setActivePage("realtime")} style={subMenuStyle("realtime")}>Real Time Invoice</div>
+          </div>}
+        </div>
+      </nav>
+      <div style={{padding:"14px 20px",borderTop:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>John Doe</div><div style={{fontSize:11,color:"#9ca3af"}}>ACME FinOps</div></div>
+        <span style={{cursor:"pointer",fontSize:16,color:"#9ca3af"}}>⚙️</span>
+      </div>
+      </>}
+    </div>
+    <InvoiceContent key={activePage} pageTitle={pages[activePage].title} pageSubtitle={pages[activePage].subtitle} notify={notify} mode={activePage==="realtime"?"realtime":"monthly"}/>
   </div>;
 }
 
