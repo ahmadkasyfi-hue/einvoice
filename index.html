@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LHDN e-Invoice Management System — Phase 2 (Correction)</title>
+  <title>LHDN e-Invoice — Phase 2 (Cleared-only Correction, Monthly + Realtime)</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23dc2626'/><text x='50%25' y='55%25' text-anchor='middle' dominant-baseline='central' fill='white' font-weight='800' font-size='14' font-family='sans-serif'>RU</text></svg>" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -18,7 +18,14 @@
   <script type="text/babel">
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
 
-// ── Status Config ──
+// ────────────────────────────────────────────────────────
+// REVISED RULE SET (27 April 2026)
+// R1 — CN/DN only on Cleared originals
+// R2 — Realtime is IN scope for CN/DN
+// R3 — Once a CN or DN exists, no more CN/DN can be created on the original or on the correction row
+// R4 — Cancel only when status is Cleared (replaces Phase 1 Submitted-3-day-cancel)
+// R5 — External user only sees Cleared invoices (incl. CN/DN); transitions to Canceled disappear
+// ────────────────────────────────────────────────────────
 const STATUS_CONFIG = {
   "Submitted":            { bg: "#16a34a", text: "#fff", style: "filled" },
   "Cleared":              { bg: "#0d9488", text: "#fff", style: "filled" },
@@ -28,28 +35,25 @@ const STATUS_CONFIG = {
   "Calculation Initiated":{ bg: "#fff7ed", text: "#ea580c", border: "1px solid #ea580c", style: "outline" },
   "Failed to Submit":     { bg: "#fef2f2", text: "#dc2626", border: "1px solid #dc2626", style: "outline" },
   "Corrected":            { bg: "#ede9fe", text: "#6d28d9", border: "1px solid #6d28d9", style: "outline" },
-  "Superseded":           { bg: "transparent", text: "#9ca3af", style: "text" },
 };
-// Phase 2 confirmed rules (per Clarification Answer):
-//   A1 — Only Rejected qualifies as the "failed" trigger. (Failed to Submit / Failed to Calculate are NOT eligible.)
-//   D6 — Cleared invoices ARE eligible for CN/DN (it's the happy-path end state).
-//   C8 — Canceled invoices ARE eligible.
-const CORRECTABLE_ORIGINAL_STATUSES = ["Rejected","Cleared","Canceled"];
-const FAILED_CORRECTION_STATUSES = ["Rejected","Failed to Submit","Failed to Calculate"]; // when CN/DN itself is failed
 const ALL_STATUSES = Object.keys(STATUS_CONFIG);
+const FAILED_CORRECTION_STATUSES = ["Rejected","Failed to Submit","Failed to Calculate"];
 const STATUS_DESC = {
   "Submitted": "e-Invoice sent to Taxilla",
-  "Cleared": "e-Invoice approved by LHDN (IRBM) — happy-path end state",
+  "Cleared": "e-Invoice approved by LHDN (IRBM)",
   "Failed to Calculate": "e-Invoice calculation failed",
   "Rejected": "e-Invoice rejected by LHDN",
   "Canceled": "e-Invoice has been canceled",
   "Calculation Initiated": "Calculation has been initiated",
   "Failed to Submit": "e-Invoice failed to send to Taxilla",
   "Corrected": "Original invoice has been corrected by a CN or DN",
-  "Superseded": "Replaced by a newer correction",
 };
 const SEARCH_TYPES = ["e-Invoice ID", "Business Name", "Business ID", "Brand Name", "Brand ID"];
 const NOW = new Date("2026-04-26T12:00:00");
+
+// External persona — single merchant per requirement
+const EXTERNAL_BUSINESS_ID = "BUS-952-16384927";
+const EXTERNAL_BUSINESS_NAME = "Malaysia Airlines";
 
 // ── Helpers ──
 const fmtCurrency = (v) => v == null ? "-" : v.toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -58,13 +62,7 @@ const fmtDateFull = (d) => { const day=String(d.getDate()).padStart(2,"0"); cons
 const getChargePeriod = (period) => { const [m,y]=period.split(" "); const ms=["January","February","March","April","May","June","July","August","September","October","November","December"]; const mi=ms.indexOf(m); return `${fmtDateFull(new Date(+y,mi,1))} - ${fmtDateFull(new Date(+y,mi+1,0))}`; };
 const getInvoiceDate = (period) => { const [m,y]=period.split(" "); const ms=["January","February","March","April","May","June","July","August","September","October","November","December"]; const mi=ms.indexOf(m); return fmtDateFull(new Date(+y,mi+1,1)); };
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-
-// Phase 1 cancel window: Submitted ≤ 3 days
-const isSubmittedOver3Days = (inv) => { if(inv.status!=="Submitted"||!inv.submittedDate) return false; return (NOW-new Date(inv.submittedDate))/(1000*60*60*24)>3; };
-
-// Phase 2 — correction-window helpers (per answers C6 + A2 + C12)
 const lastDayOfMonthFromIso = (iso) => { const d=new Date(iso); return new Date(d.getFullYear(), d.getMonth()+1, 0, 23, 59, 59); };
-// Returns true if the original invoice is within the window where a NEW CN/DN can be created (3 days after submittedDate ≤ now ≤ end of submittedDate's month)
 const correctionWindowOpenForOriginal = (orig) => {
   if (!orig.submittedDate) return false;
   const sub = new Date(orig.submittedDate);
@@ -72,90 +70,151 @@ const correctionWindowOpenForOriginal = (orig) => {
   const endWindow = lastDayOfMonthFromIso(orig.submittedDate);
   return NOW >= startWindow && NOW <= endWindow;
 };
-// Returns true if a CN/DN row can still be edited / cross-converted (per C12: 3-day rule does NOT apply, only end-of-month from the original)
 const correctionEditWindowOpen = (origInvoice) => {
   if (!origInvoice || !origInvoice.submittedDate) return false;
   return NOW <= lastDayOfMonthFromIso(origInvoice.submittedDate);
 };
 
-// ── Sample Data — at least 3 per status ──
-// Note: NOW = 2026-04-26. Window for an April-2026-submitted original = (sub+3d, end of April 2026 = 2026-04-30).
-function seed() {
-  const data = [
-    // ── Submitted (originals) ── 3 samples
-    { id:"71010101", biz:"PETRONAS", bus:"BUS-293-58392017", brand:"PETRONAS KL", clint:"CLINT-293-00000001", period:"March 2026", pMonth:"March", pYear:"2026", amount:80155.55, status:"Submitted", submittedDate:"2026-04-25T10:00:00", lastUpdated:"2026-04-25T10:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"FPX",count:1024,amount:24000},{channel:"GrabPay",count:905,amount:19050.30},{channel:"ShopeePay",count:1061,amount:36055.25},{channel:"Cards Maybank",count:50,amount:1050}], timeline:[{date:"25 April 2026, 10:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"71010102", biz:"Maxis Berhad", bus:"BUS-510-30303030", brand:"Maxis MY", clint:"CLINT-510-30303031", period:"March 2026", pMonth:"March", pYear:"2026", amount:32500.00, status:"Submitted", submittedDate:"2026-04-22T08:00:00", lastUpdated:"2026-04-22T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"FPX",count:600,amount:14500},{channel:"E-Wallet TnG",count:900,amount:18000}], timeline:[{date:"22 April 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"71010103", biz:"Celcom", bus:"BUS-511-31313131", brand:"Celcom MY", clint:"CLINT-511-31313132", period:"March 2026", pMonth:"March", pYear:"2026", amount:18750.50, status:"Submitted", submittedDate:"2026-04-15T08:00:00", lastUpdated:"2026-04-15T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"FPX",count:300,amount:6500},{channel:"DuitNow",count:600,amount:12250.50}], timeline:[{date:"15 April 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+// ────────────────────────────────────────────────────────
+// SAMPLE DATA — Malaysia Airlines comprehensive + a few other businesses
+// Malaysia Airlines (BUS-952-16384927) has 3+ rows for every status & scenario,
+// across Monthly Consolidated AND Realtime types.
+// ────────────────────────────────────────────────────────
+function ma(brand, clint) { return {biz:"Malaysia Airlines", bus:"BUS-952-16384927", brand, clint}; }
+const MA_BRANDS = {
+  flights: ma("Malaysia Airlines","CLINT-952-100000000"),
+  firefly: ma("Firefly","CLINT-952-100000001"),
+  kargo:   ma("MASkargo","CLINT-952-100000002"),
+};
+const MC_BREAKDOWN_A = [{channel:"FPX",count:1024,amount:24000},{channel:"GrabPay",count:905,amount:19050.30},{channel:"Credit Card Maybank",count:50,amount:1050}];
+const MC_BREAKDOWN_B = [{channel:"FPX",count:600,amount:14500},{channel:"E-Wallet TnG",count:900,amount:18000},{channel:"DuitNow",count:300,amount:6500}];
+const MC_BREAKDOWN_C = [{channel:"Credit Card HSBC",count:2800,amount:56000},{channel:"E-Wallet Boost",count:950,amount:19000}];
+const RT_BREAKDOWN_A = [{channel:"Subscription Fee",count:820,amount:41000},{channel:"Renewal Fee",count:340,amount:17000},{channel:"Upgrade Fee",count:150,amount:12000}];
+const RT_BREAKDOWN_B = [{channel:"Subscription Fee",count:1200,amount:60000},{channel:"Upgrade Fee",count:280,amount:22400}];
+const RT_BREAKDOWN_C = [{channel:"Renewal Fee",count:900,amount:45000},{channel:"MID Fee",count:12,amount:1800}];
 
-    // ── Cleared (originals) ── 3 samples — all in correction window
-    { id:"92857345", biz:"Maybank", bus:"BUS-101-12345678", brand:"Maybank Kawanku", clint:"CLINT-101-00000001", period:"March 2026", pMonth:"March", pYear:"2026", amount:65000.00, status:"Cleared", submittedDate:"2026-04-02T09:00:00", lastUpdated:"2026-04-03T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1500,amount:30000},{channel:"Credit Card Maybank",count:1750,amount:35000}], timeline:[{date:"3 April 2026, 08:00 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN. UUID: 0XGM5RX3ASWXT8YV"},{date:"2 April 2026, 09:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], irbmUUID:"0XGM5RX3ASWXT8YV", irbmLink:"https://myinvois.hasil.gov.my/0XGM5RX3ASWXT8YV" },
-    { id:"47582930", biz:"Wardah", bus:"BUS-846-37495820", brand:"Wardah", clint:"CLINT-846-37495821", period:"March 2026", pMonth:"March", pYear:"2026", amount:54050.50, status:"Cleared", submittedDate:"2026-04-04T14:30:00", lastUpdated:"2026-04-05T09:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:900,amount:18050.50},{channel:"Credit Card Maybank",count:1800,amount:36000}], timeline:[{date:"5 April 2026, 09:30 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN. UUID: 1ABC9KL3MN7WB9LX"},{date:"4 April 2026, 14:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], irbmUUID:"1ABC9KL3MN7WB9LX" },
-    { id:"91827364", biz:"Lazada Malaysia", bus:"BUS-663-27384950", brand:"Lazada Wallet", clint:"CLINT-663-400000003", period:"March 2026", pMonth:"March", pYear:"2026", amount:45000.00, status:"Cleared", submittedDate:"2026-04-04T15:30:00", lastUpdated:"2026-04-05T15:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1500,amount:30000},{channel:"DuitNow",count:750,amount:15000}], timeline:[{date:"5 April 2026, 15:30 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN. UUID: 3DEF8KL3MN7WB9LX"},{date:"4 April 2026, 15:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], irbmUUID:"3DEF8KL3MN7WB9LX" },
+// Helper to build invoice rows
+function inv(o) { return Object.assign({prefix:"", originalId:null, irbmUUID:null, irbmLink:null, correctedBy:null}, o); }
+function tl(date, status, desc) { return {date, status, desc}; }
 
-    // ── Rejected (originals) ── 3 samples
-    { id:"29573846", biz:"Oriental Kopi", bus:"BUS-104-95738264", brand:"Oriental Kopi Penang", clint:"CLINT-104-121434400", period:"March 2026", pMonth:"March", pYear:"2026", amount:40250.00, status:"Rejected", submittedDate:"2026-04-15T19:45:00", lastUpdated:"2026-04-16T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1200,amount:24000},{channel:"E-Wallet GrabPay",count:650,amount:16250}], timeline:[{date:"16 April 2026, 10:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN. Reason: Buyer SST mismatch"},{date:"15 April 2026, 19:45 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"38475612", biz:"Shopee Malaysia", bus:"BUS-552-18374650", brand:"ShopeePay", clint:"CLINT-552-300000002", period:"March 2026", pMonth:"March", pYear:"2026", amount:67500.25, status:"Rejected", submittedDate:"2026-04-10T10:00:00", lastUpdated:"2026-04-12T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Credit Card Maybank",count:2700,amount:40500},{channel:"E-Wallet",count:1800,amount:27000.25}], timeline:[{date:"12 April 2026, 11:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN. Reason: TIN format invalid"},{date:"10 April 2026, 10:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"63849502", biz:"Bonia Malaysia", bus:"BUS-628-49573829", brand:"Bonia Watches", clint:"CLINT-628-000000002", period:"February 2026", pMonth:"February", pYear:"2026", amount:98888.50, status:"Rejected", submittedDate:"2026-03-05T09:00:00", lastUpdated:"2026-03-06T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Credit Card RHB",count:3200,amount:64000},{channel:"FPX",count:1744,amount:34888.50}], timeline:[{date:"6 March 2026, 11:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN. Reason: Filing window closed"},{date:"5 March 2026, 09:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+// Monthly Consolidated — Malaysia Airlines (the main playground)
+const MA_MONTHLY = [
+  // ── Submitted (3) — no Cancel anymore (R4 deprecates Phase 1 3-day cancel)
+  inv({...MA_BRANDS.flights, id:"MA-MC-S001", period:"March 2026", pMonth:"March", pYear:"2026", amount:80155.55, status:"Submitted", submittedDate:"2026-04-25T10:00:00", lastUpdated:"2026-04-25T10:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("25 April 2026, 10:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-S002", period:"March 2026", pMonth:"March", pYear:"2026", amount:38500.00, status:"Submitted", submittedDate:"2026-04-22T08:00:00", lastUpdated:"2026-04-22T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("22 April 2026, 08:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-S003", period:"March 2026", pMonth:"March", pYear:"2026", amount:75000.00, status:"Submitted", submittedDate:"2026-04-15T08:00:00", lastUpdated:"2026-04-15T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("15 April 2026, 08:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
 
-    // ── Failed to Calculate (originals — NOT eligible per A1) ── 3 samples
-    { id:"85739261", biz:"Air Asia", bus:"BUS-739-28563947", brand:"Air Asia Malaysia", clint:"CLINT-739-01911934", period:"February 2026", pMonth:"February", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-20T11:15:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"Credit Card CIMB",count:1650,amount:32999.50},{channel:"DuitNow",count:420,amount:8400}], timeline:[{date:"20 April 2026, 11:15 (GMT+8)",status:"Failed to Calculate",desc:"Error: Missing TIN data on business profile"}] },
-    { id:"82934428", biz:"Beryl's Chocolate", bus:"BUS-385-74920583", brand:"Beryl's Chocolate Joh...", clint:"CLINT-385-100000000", period:"December 2025", pMonth:"December", pYear:"2025", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-01-21T09:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"E-Wallet TnG",count:1400,amount:35000},{channel:"Credit Card OCBC",count:600,amount:12000}], timeline:[{date:"21 January 2026, 09:00 (GMT+8)",status:"Failed to Calculate",desc:"Error: Currency conversion failure"}] },
-    { id:"80008001", biz:"Watsons MY", bus:"BUS-721-80008001", brand:"Watsons", clint:"CLINT-721-80008001", period:"March 2026", pMonth:"March", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-22T07:30:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"FPX",count:980,amount:19800},{channel:"Credit Card HSBC",count:840,amount:21000}], timeline:[{date:"22 April 2026, 07:30 (GMT+8)",status:"Failed to Calculate",desc:"Error: Brand TIN missing on business profile"}] },
+  // ── Cleared (3 in window — eligible for CN/DN)
+  inv({...MA_BRANDS.flights, id:"MA-MC-C001", period:"March 2026", pMonth:"March", pYear:"2026", amount:65000.00, status:"Cleared", submittedDate:"2026-04-02T09:00:00", lastUpdated:"2026-04-03T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("3 April 2026, 08:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-CL-X1Y2Z3"), tl("2 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-CL-X1Y2Z3", irbmLink:"https://myinvois.hasil.gov.my/MA-CL-X1Y2Z3"}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-C002", period:"March 2026", pMonth:"March", pYear:"2026", amount:42000.00, status:"Cleared", submittedDate:"2026-04-04T14:30:00", lastUpdated:"2026-04-05T09:30:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("5 April 2026, 09:30 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-CL-A1B2C3"), tl("4 April 2026, 14:30 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-CL-A1B2C3"}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-C003", period:"March 2026", pMonth:"March", pYear:"2026", amount:91000.00, status:"Cleared", submittedDate:"2026-04-06T15:30:00", lastUpdated:"2026-04-08T15:30:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("8 April 2026, 15:30 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-CL-D4E5F6"), tl("6 April 2026, 15:30 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-CL-D4E5F6"}),
+  // window-expired Cleared — to demonstrate "filing window closed" UI
+  inv({...MA_BRANDS.flights, id:"MA-MC-C004", period:"January 2026", pMonth:"January", pYear:"2026", amount:55000.00, status:"Cleared", submittedDate:"2026-02-04T09:00:00", lastUpdated:"2026-02-05T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("5 February 2026, 08:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-OLD-001")], irbmUUID:"MA-OLD-001"}),
 
-    // ── Failed to Submit (originals — NOT eligible per A1) ── 3 samples
-    { id:"74659203", biz:"Beryl's Chocolate", bus:"BUS-385-74920583", brand:"Beryl's Chocolate Joh...", clint:"CLINT-385-100000000", period:"November 2025", pMonth:"November", pYear:"2025", amount:32999.50, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-01-18T13:45:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1100,amount:22000},{channel:"DuitNow",count:550,amount:10999.50}], timeline:[{date:"18 January 2026, 13:45 (GMT+8)",status:"Failed to Submit",desc:"Network timeout to Taxilla API"}] },
-    { id:"75000111", biz:"Padini", bus:"BUS-441-75000111", brand:"Padini Concept", clint:"CLINT-441-75000111", period:"February 2026", pMonth:"February", pYear:"2026", amount:21500.75, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-15T13:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:480,amount:10300.75},{channel:"E-Wallet GrabPay",count:600,amount:11200}], timeline:[{date:"15 April 2026, 13:00 (GMT+8)",status:"Failed to Submit",desc:"Taxilla returned 502 Bad Gateway"}] },
-    { id:"75000222", biz:"Mr DIY", bus:"BUS-441-75000222", brand:"Mr DIY MY", clint:"CLINT-441-75000222", period:"March 2026", pMonth:"March", pYear:"2026", amount:48200.00, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-21T08:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"DuitNow",count:1500,amount:30000},{channel:"FPX",count:910,amount:18200}], timeline:[{date:"21 April 2026, 08:30 (GMT+8)",status:"Failed to Submit",desc:"Taxilla certificate validation error"}] },
+  // ── Failed to Calculate (3) — NOT eligible for CN/DN per R1
+  inv({...MA_BRANDS.flights, id:"MA-MC-FC001", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-22T07:30:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("22 April 2026, 07:30 (GMT+8)","Failed to Calculate","Brand TIN missing on profile")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-FC002", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-23T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("23 April 2026, 08:00 (GMT+8)","Failed to Calculate","Currency conversion failed")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-FC003", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-23T09:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("23 April 2026, 09:00 (GMT+8)","Failed to Calculate","Buyer TIN format invalid")]}),
 
-    // ── Calculation Initiated (originals) ── 3 samples
-    { id:"10928374", biz:"Malaysia Airlines", bus:"BUS-952-16384927", brand:"Malaysia Airlines", clint:"CLINT-952-100000000", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"Credit Card HSBC",count:2800,amount:56000},{channel:"E-Wallet Boost",count:950,amount:19000}], timeline:[{date:"26 April 2026, 08:00 (GMT+8)",status:"Calculation Initiated",desc:"Monthly scheduler triggered"}] },
-    { id:"64738291", biz:"Touch 'n Go", bus:"BUS-774-38495061", brand:"TnG eWallet", clint:"CLINT-774-500000004", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T07:45:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"E-Wallet TnG",count:8500,amount:170000},{channel:"Credit Card CIMB",count:1200,amount:24000}], timeline:[{date:"26 April 2026, 07:45 (GMT+8)",status:"Calculation Initiated",desc:"Monthly scheduler triggered"}] },
-    { id:"10000003", biz:"GoBox MY", bus:"BUS-441-10000003", brand:"GoBox Logistics", clint:"CLINT-441-10000003", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T07:55:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"FPX",count:600,amount:13500},{channel:"DuitNow",count:850,amount:17500}], timeline:[{date:"26 April 2026, 07:55 (GMT+8)",status:"Calculation Initiated",desc:"Monthly scheduler triggered"}] },
+  // ── Failed to Submit (3) — NOT eligible for CN/DN
+  inv({...MA_BRANDS.flights, id:"MA-MC-FS001", period:"March 2026", pMonth:"March", pYear:"2026", amount:55000.00, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-15T13:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("15 April 2026, 13:00 (GMT+8)","Failed to Submit","Network timeout to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-FS002", period:"March 2026", pMonth:"March", pYear:"2026", amount:32000.00, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-21T08:30:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("21 April 2026, 08:30 (GMT+8)","Failed to Submit","Taxilla 502 Bad Gateway")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-FS003", period:"March 2026", pMonth:"March", pYear:"2026", amount:75000.00, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-23T09:30:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("23 April 2026, 09:30 (GMT+8)","Failed to Submit","Taxilla certificate validation error")]}),
 
-    // ── Canceled (originals) ── 3 samples (only the first is in the correction window)
-    { id:"60001001", biz:"Bonia Malaysia", bus:"BUS-628-49573829", brand:"Bonia Watches", clint:"CLINT-628-000000002", period:"March 2026", pMonth:"March", pYear:"2026", amount:88200.00, status:"Canceled", submittedDate:"2026-04-20T09:00:00", lastUpdated:"2026-04-22T10:00:00", updatedBy:"john.doe@acme.com", chargeBreakdown:[{channel:"Credit Card RHB",count:2900,amount:58000},{channel:"FPX",count:1510,amount:30200}], timeline:[{date:"22 April 2026, 10:00 (GMT+8)",status:"Canceled",desc:"e-Invoice canceled by john.doe@acme.com"},{date:"20 April 2026, 09:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"60001002", biz:"Hero Supermarket", bus:"BUS-441-60001002", brand:"Hero MY", clint:"CLINT-441-60001002", period:"February 2026", pMonth:"February", pYear:"2026", amount:38400.00, status:"Canceled", submittedDate:"2026-03-20T08:30:00", lastUpdated:"2026-03-22T08:30:00", updatedBy:"jane.lee@acme.com", chargeBreakdown:[{channel:"FPX",count:900,amount:18200},{channel:"E-Wallet TnG",count:1010,amount:20200}], timeline:[{date:"22 March 2026, 08:30 (GMT+8)",status:"Canceled",desc:"e-Invoice canceled by jane.lee@acme.com"},{date:"20 March 2026, 08:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    { id:"60001003", biz:"AirAsia X", bus:"BUS-441-60001003", brand:"AAX", clint:"CLINT-441-60001003", period:"January 2026", pMonth:"January", pYear:"2026", amount:21500.00, status:"Canceled", submittedDate:"2026-02-15T08:30:00", lastUpdated:"2026-02-17T08:30:00", updatedBy:"emma@acme.com", chargeBreakdown:[{channel:"Credit Card Maybank",count:600,amount:12000},{channel:"DuitNow",count:475,amount:9500}], timeline:[{date:"17 February 2026, 08:30 (GMT+8)",status:"Canceled",desc:"e-Invoice canceled by emma@acme.com"},{date:"15 February 2026, 08:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
+  // ── Rejected (3) — NOT eligible for CN/DN per R1
+  inv({...MA_BRANDS.flights, id:"MA-MC-R001", period:"March 2026", pMonth:"March", pYear:"2026", amount:50000.00, status:"Rejected", submittedDate:"2026-04-10T19:45:00", lastUpdated:"2026-04-11T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("11 April 2026, 10:00 (GMT+8)","Rejected","Buyer SST mismatch"), tl("10 April 2026, 19:45 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-R002", period:"March 2026", pMonth:"March", pYear:"2026", amount:38000.00, status:"Rejected", submittedDate:"2026-04-12T10:00:00", lastUpdated:"2026-04-13T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("13 April 2026, 11:00 (GMT+8)","Rejected","TIN format invalid"), tl("12 April 2026, 10:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-R003", period:"March 2026", pMonth:"March", pYear:"2026", amount:80000.00, status:"Rejected", submittedDate:"2026-04-15T09:00:00", lastUpdated:"2026-04-16T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("16 April 2026, 11:00 (GMT+8)","Rejected","Filing-month closed at IRBM"), tl("15 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
 
-    // ── Corrected (originals already corrected) ── ≥3 samples
-    // 67483921 → has DN active (Rejected, in window)
-    { id:"67483921", biz:"Air Asia", bus:"BUS-739-28563947", brand:"Air Asia Malaysia", clint:"CLINT-739-01911934", period:"March 2026", pMonth:"March", pYear:"2026", amount:55000, status:"Corrected", correctedBy:"DN-67483921", submittedDate:"2026-04-08T08:00:00", lastUpdated:"2026-04-12T10:00:00", updatedBy:"Mirfahmi@acme.com", chargeBreakdown:[{channel:"FPX",count:900,amount:18000},{channel:"Credit Card CIMB",count:1200,amount:24000},{channel:"DuitNow",count:600,amount:13000}], timeline:[{date:"12 April 2026, 10:00 (GMT+8)",status:"Corrected",desc:"Original corrected by DN-67483921"},{date:"10 April 2026, 09:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN. Reason: Tax amount mismatch"},{date:"8 April 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}] },
-    // 55418802 → has CN-cleared
-    { id:"55418802", biz:"Wardah", bus:"BUS-846-37495820", brand:"Wardah", clint:"CLINT-846-37495821", period:"March 2026", pMonth:"March", pYear:"2026", amount:42000, status:"Corrected", correctedBy:"CN-55418802", submittedDate:"2026-04-05T14:30:00", lastUpdated:"2026-04-18T08:30:00", updatedBy:"Brycen@acme.com", chargeBreakdown:[{channel:"FPX",count:600,amount:14000},{channel:"Credit Card Maybank",count:1400,amount:28000}], timeline:[{date:"18 April 2026, 08:30 (GMT+8)",status:"Corrected",desc:"Original corrected by CN-55418802 (Cleared)"},{date:"5 April 2026, 14:30 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN"}] },
-    // 30000001 → CN active (Submitted) + DN superseded
-    { id:"30000001", biz:"Padini", bus:"BUS-441-75000111", brand:"Padini Concept", clint:"CLINT-441-75000111", period:"March 2026", pMonth:"March", pYear:"2026", amount:25000, status:"Corrected", correctedBy:"CN-30000001", submittedDate:"2026-04-09T11:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"Anita@acme.com", chargeBreakdown:[{channel:"FPX",count:500,amount:10000},{channel:"DuitNow",count:750,amount:15000}], timeline:[{date:"25 April 2026, 11:00 (GMT+8)",status:"Corrected",desc:"Active correction CN-30000001 (superseded prior DN-30000001)"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Corrected",desc:"DN-30000001 issued"},{date:"9 April 2026, 11:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN"}] },
-    // 30000002 → DN active (Cleared) + CN superseded
-    { id:"30000002", biz:"Mr DIY", bus:"BUS-441-75000222", brand:"Mr DIY MY", clint:"CLINT-441-75000222", period:"March 2026", pMonth:"March", pYear:"2026", amount:48200, status:"Corrected", correctedBy:"DN-30000002", submittedDate:"2026-04-08T08:30:00", lastUpdated:"2026-04-23T10:00:00", updatedBy:"Eric@acme.com", chargeBreakdown:[{channel:"DuitNow",count:1500,amount:30000},{channel:"FPX",count:910,amount:18200}], timeline:[{date:"23 April 2026, 10:00 (GMT+8)",status:"Corrected",desc:"Active DN-30000002 cleared (superseded prior CN-30000002)"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Corrected",desc:"CN-30000002 issued"},{date:"8 April 2026, 08:30 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN"}] },
-    // 30000003 → CN active (Rejected, in window) + DN superseded
-    { id:"30000003", biz:"GoBox MY", bus:"BUS-441-10000003", brand:"GoBox Logistics", clint:"CLINT-441-10000003", period:"March 2026", pMonth:"March", pYear:"2026", amount:31000, status:"Corrected", correctedBy:"CN-30000003", submittedDate:"2026-04-12T08:00:00", lastUpdated:"2026-04-23T08:30:00", updatedBy:"Karim@acme.com", chargeBreakdown:[{channel:"FPX",count:600,amount:13500},{channel:"DuitNow",count:850,amount:17500}], timeline:[{date:"23 April 2026, 08:30 (GMT+8)",status:"Corrected",desc:"Active CN-30000003 issued (prior DN-30000003 superseded)"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Corrected",desc:"DN-30000003 issued"},{date:"12 April 2026, 08:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN"}] },
+  // ── Canceled (3) — was Cleared, then user clicked Cancel (R4)
+  inv({...MA_BRANDS.flights, id:"MA-MC-CN001", period:"March 2026", pMonth:"March", pYear:"2026", amount:60000.00, status:"Canceled", submittedDate:"2026-04-08T09:00:00", lastUpdated:"2026-04-22T11:00:00", updatedBy:"john.doe@acme.com", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("22 April 2026, 11:00 (GMT+8)","Canceled","Cleared invoice canceled by john.doe@acme.com"), tl("9 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-CL-CXC001"), tl("8 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-CN002", period:"March 2026", pMonth:"March", pYear:"2026", amount:36000.00, status:"Canceled", submittedDate:"2026-04-10T09:00:00", lastUpdated:"2026-04-23T11:00:00", updatedBy:"jane.lee@acme.com", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("23 April 2026, 11:00 (GMT+8)","Canceled","Cleared invoice canceled by jane.lee@acme.com"), tl("11 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-CN003", period:"March 2026", pMonth:"March", pYear:"2026", amount:88000.00, status:"Canceled", submittedDate:"2026-04-12T09:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"emma@acme.com", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("25 April 2026, 11:00 (GMT+8)","Canceled","Cleared invoice canceled by emma@acme.com"), tl("13 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN")]}),
 
-    // ── Active correction rows ──
-    // DN-67483921: Rejected, in window — supports Update DN + cross-convert to CN
-    { id:"DN-67483921", originalId:"67483921", prefix:"DN", biz:"Air Asia", bus:"BUS-739-28563947", brand:"Air Asia Malaysia", clint:"CLINT-739-01911934", period:"March 2026", pMonth:"March", pYear:"2026", amount:62500, status:"Rejected", submittedDate:"2026-04-12T10:00:00", lastUpdated:"2026-04-13T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:900,amount:20000},{channel:"Credit Card CIMB",count:1200,amount:27500},{channel:"DuitNow",count:600,amount:15000}], timeline:[{date:"13 April 2026, 11:00 (GMT+8)",status:"Rejected",desc:"DN-67483921 rejected by LHDN. Reason: Reference document not found"},{date:"12 April 2026, 10:00 (GMT+8)",status:"Submitted",desc:"DN-67483921 sent to Taxilla"}] },
-    // CN-55418802: Cleared — terminal, no further actions
-    { id:"CN-55418802", originalId:"55418802", prefix:"CN", biz:"Wardah", bus:"BUS-846-37495820", brand:"Wardah", clint:"CLINT-846-37495821", period:"March 2026", pMonth:"March", pYear:"2026", amount:35500, status:"Cleared", submittedDate:"2026-04-15T10:00:00", lastUpdated:"2026-04-18T08:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:600,amount:11500},{channel:"Credit Card Maybank",count:1400,amount:24000}], timeline:[{date:"18 April 2026, 08:30 (GMT+8)",status:"Cleared",desc:"CN-55418802 approved by LHDN. UUID: CN9TX2MN3LM7WB9L"},{date:"15 April 2026, 10:00 (GMT+8)",status:"Submitted",desc:"CN-55418802 sent to Taxilla"}], irbmUUID:"CN9TX2MN3LM7WB9L" },
-    // CN-30000001: Submitted (in-flight — per B8 cannot cancel; Retry allowed)
-    { id:"CN-30000001", originalId:"30000001", prefix:"CN", biz:"Padini", bus:"BUS-441-75000111", brand:"Padini Concept", clint:"CLINT-441-75000111", period:"March 2026", pMonth:"March", pYear:"2026", amount:21000, status:"Submitted", submittedDate:"2026-04-25T11:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"FPX",count:500,amount:8500},{channel:"DuitNow",count:750,amount:12500}], timeline:[{date:"25 April 2026, 11:00 (GMT+8)",status:"Submitted",desc:"CN-30000001 sent to Taxilla (re-issue after DN-30000001)"},{date:"25 April 2026, 11:00 (GMT+8)",status:"Calculation Initiated",desc:"CN-30000001 created"}] },
-    // DN-30000002: Cleared (terminal)
-    { id:"DN-30000002", originalId:"30000002", prefix:"DN", biz:"Mr DIY", bus:"BUS-441-75000222", brand:"Mr DIY MY", clint:"CLINT-441-75000222", period:"March 2026", pMonth:"March", pYear:"2026", amount:54200, status:"Cleared", submittedDate:"2026-04-20T10:00:00", lastUpdated:"2026-04-23T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"DuitNow",count:1500,amount:34000},{channel:"FPX",count:910,amount:20200}], timeline:[{date:"23 April 2026, 10:00 (GMT+8)",status:"Cleared",desc:"DN-30000002 approved by LHDN. UUID: DN5XK2MN3LM7WB9"},{date:"20 April 2026, 10:00 (GMT+8)",status:"Submitted",desc:"DN-30000002 sent to Taxilla"}], irbmUUID:"DN5XK2MN3LM7WB9" },
-    // CN-30000003: Rejected, in window — supports Update CN + cross-convert to DN
-    { id:"CN-30000003", originalId:"30000003", prefix:"CN", biz:"GoBox MY", bus:"BUS-441-10000003", brand:"GoBox Logistics", clint:"CLINT-441-10000003", period:"March 2026", pMonth:"March", pYear:"2026", amount:24500, status:"Rejected", submittedDate:"2026-04-22T08:00:00", lastUpdated:"2026-04-23T08:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:600,amount:10500},{channel:"DuitNow",count:850,amount:14000}], timeline:[{date:"23 April 2026, 08:30 (GMT+8)",status:"Rejected",desc:"CN-30000003 rejected by LHDN. Reason: Reference document mismatch"},{date:"22 April 2026, 08:00 (GMT+8)",status:"Submitted",desc:"CN-30000003 sent to Taxilla"}] },
+  // ── Calculation Initiated (3)
+  inv({...MA_BRANDS.flights, id:"MA-MC-CI001", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T08:00:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("26 April 2026, 08:00 (GMT+8)","Calculation Initiated","Monthly scheduler triggered")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-MC-CI002", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T07:50:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("26 April 2026, 07:50 (GMT+8)","Calculation Initiated","Monthly scheduler triggered")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-MC-CI003", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T07:55:00", updatedBy:"system@scheduler", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("26 April 2026, 07:55 (GMT+8)","Calculation Initiated","Monthly scheduler triggered")]}),
 
-    // ── Superseded correction rows ── 3 samples
-    { id:"DN-30000001", originalId:"30000001", prefix:"DN", biz:"Padini", bus:"BUS-441-75000111", brand:"Padini Concept", clint:"CLINT-441-75000111", period:"March 2026", pMonth:"March", pYear:"2026", amount:28500, status:"Superseded", submittedDate:"2026-04-15T09:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"FPX",count:500,amount:11500},{channel:"DuitNow",count:750,amount:17000}], timeline:[{date:"25 April 2026, 11:00 (GMT+8)",status:"Superseded",desc:"Replaced by CN-30000001"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Submitted",desc:"DN-30000001 sent to Taxilla"}] },
-    { id:"CN-30000002", originalId:"30000002", prefix:"CN", biz:"Mr DIY", bus:"BUS-441-75000222", brand:"Mr DIY MY", clint:"CLINT-441-75000222", period:"March 2026", pMonth:"March", pYear:"2026", amount:42000, status:"Superseded", submittedDate:"2026-04-15T09:00:00", lastUpdated:"2026-04-20T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"DuitNow",count:1500,amount:25500},{channel:"FPX",count:910,amount:16500}], timeline:[{date:"20 April 2026, 10:00 (GMT+8)",status:"Superseded",desc:"Replaced by DN-30000002"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Submitted",desc:"CN-30000002 sent to Taxilla"}] },
-    { id:"DN-30000003", originalId:"30000003", prefix:"DN", biz:"GoBox MY", bus:"BUS-441-10000003", brand:"GoBox Logistics", clint:"CLINT-441-10000003", period:"March 2026", pMonth:"March", pYear:"2026", amount:35500, status:"Superseded", submittedDate:"2026-04-15T09:00:00", lastUpdated:"2026-04-22T08:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"FPX",count:600,amount:15500},{channel:"DuitNow",count:850,amount:20000}], timeline:[{date:"22 April 2026, 08:00 (GMT+8)",status:"Superseded",desc:"Replaced by CN-30000003"},{date:"15 April 2026, 09:00 (GMT+8)",status:"Submitted",desc:"DN-30000003 sent to Taxilla"}] },
-  ];
-  return data.map(m=>({prefix:m.prefix||"", originalId:m.originalId||null, ...m})).sort((a,b)=>new Date(b.lastUpdated||0)-new Date(a.lastUpdated||0));
-}
+  // ── Corrected (originals with active CN/DN — 3 distinct correction states)
+  // 1) Corrected → CN active (Cleared)
+  inv({...MA_BRANDS.flights, id:"MA-MC-OC001", period:"March 2026", pMonth:"March", pYear:"2026", amount:50000, status:"Corrected", correctedBy:"CN-MA-MC-OC001", submittedDate:"2026-04-04T09:00:00", lastUpdated:"2026-04-18T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("18 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by CN-MA-MC-OC001 (Cleared at IRBM)"), tl("5 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-OC1-OLD")]}),
+  // 2) Corrected → DN active (Cleared)
+  inv({...MA_BRANDS.firefly, id:"MA-MC-OC002", period:"March 2026", pMonth:"March", pYear:"2026", amount:39000, status:"Corrected", correctedBy:"DN-MA-MC-OC002", submittedDate:"2026-04-05T09:00:00", lastUpdated:"2026-04-19T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:MC_BREAKDOWN_B, timeline:[tl("19 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by DN-MA-MC-OC002 (Cleared at IRBM)"), tl("6 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-OC2-OLD")]}),
+  // 3) Corrected → CN active (Rejected — eligible for Update CN)
+  inv({...MA_BRANDS.kargo, id:"MA-MC-OC003", period:"March 2026", pMonth:"March", pYear:"2026", amount:78000, status:"Corrected", correctedBy:"CN-MA-MC-OC003", submittedDate:"2026-04-08T09:00:00", lastUpdated:"2026-04-23T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:MC_BREAKDOWN_C, timeline:[tl("23 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by CN-MA-MC-OC003 (in flight)"), tl("9 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-OC3-OLD")]}),
 
-const seedRealtime = () => [
-  { id:"71234501", biz:"TechServ Malaysia", bus:"BUS-401-71234501", brand:"TechServ Pro", clint:"CLINT-401-10000001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Submitted", submittedDate:"2026-04-25T09:00:00", lastUpdated:"2026-04-25T09:30:00", updatedBy:"system@kafka", chargeBreakdown:[{channel:"Subscription Fee",count:820,amount:41000},{channel:"Renewal Fee",count:340,amount:17000},{channel:"Upgrade Fee",count:150,amount:12000}], timeline:[{date:"25 April 2026, 09:30 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], prefix:"" },
-  { id:"71234502", biz:"CloudHost Sdn Bhd", bus:"BUS-402-71234502", brand:"CloudHost", clint:"CLINT-402-10000002", period:"April 2026", pMonth:"April", pYear:"2026", amount:30000, status:"Submitted", submittedDate:"2026-04-22T08:00:00", lastUpdated:"2026-04-22T08:00:00", updatedBy:"system@kafka", chargeBreakdown:[{channel:"Subscription Fee",count:300,amount:15000},{channel:"Renewal Fee",count:300,amount:15000}], timeline:[{date:"22 April 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], prefix:"" },
-  { id:"71234503", biz:"SaaS Global MY", bus:"BUS-403-71234503", brand:"SaaS Platform", clint:"CLINT-403-10000003", period:"February 2026", pMonth:"February", pYear:"2026", amount:47900, status:"Rejected", submittedDate:"2026-02-10T16:00:00", lastUpdated:"2026-02-11T09:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Subscription Fee",count:560,amount:28000},{channel:"Renewal Fee",count:210,amount:10500},{channel:"Upgrade Fee",count:95,amount:7600},{channel:"MID Fee",count:12,amount:1800}], timeline:[{date:"11 February 2026, 09:00 (GMT+8)",status:"Rejected",desc:"e-Invoice rejected by LHDN. Reason: Invalid SST registration"}], prefix:"" },
-  { id:"71234504", biz:"PayNet Solutions", bus:"BUS-404-71234504", brand:"PayNet Gateway", clint:"CLINT-404-10000004", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-20T11:00:00", updatedBy:"system@kafka", chargeBreakdown:[{channel:"Renewal Fee",count:900,amount:45000},{channel:"Subscription Fee",count:650,amount:32500}], timeline:[{date:"20 April 2026, 11:00 (GMT+8)",status:"Failed to Calculate",desc:"Calculation error: business not whitelisted"}], prefix:"" },
-  { id:"71234509", biz:"eKedai Systems", bus:"BUS-409-71234509", brand:"eKedai POS", clint:"CLINT-409-10000009", period:"February 2026", pMonth:"February", pYear:"2026", amount:77500, status:"Cleared", submittedDate:"2026-02-12T08:00:00", lastUpdated:"2026-02-13T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Renewal Fee",count:900,amount:45000},{channel:"Subscription Fee",count:650,amount:32500}], timeline:[{date:"13 February 2026, 08:00 (GMT+8)",status:"Cleared",desc:"e-Invoice Approved by LHDN. UUID: RT9PQ2LM3NQ7WB9L"},{date:"12 February 2026, 08:00 (GMT+8)",status:"Submitted",desc:"e-Invoice sent to Taxilla"}], irbmUUID:"RT9PQ2LM3NQ7WB9L", prefix:"" },
+  // ── Active correction rows (3+)
+  inv({...MA_BRANDS.flights, id:"CN-MA-MC-OC001", originalId:"MA-MC-OC001", prefix:"CN", period:"March 2026", pMonth:"March", pYear:"2026", amount:42000, status:"Cleared", submittedDate:"2026-04-15T10:00:00", lastUpdated:"2026-04-18T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1024,amount:20000},{channel:"GrabPay",count:905,amount:16000},{channel:"Credit Card Maybank",count:50,amount:6000}], timeline:[tl("18 April 2026, 10:00 (GMT+8)","Cleared","CN-MA-MC-OC001 approved by LHDN. UUID: CN-OC1-NEW"), tl("15 April 2026, 10:00 (GMT+8)","Submitted","CN-MA-MC-OC001 sent to Taxilla")], irbmUUID:"CN-OC1-NEW"}),
+  inv({...MA_BRANDS.firefly, id:"DN-MA-MC-OC002", originalId:"MA-MC-OC002", prefix:"DN", period:"March 2026", pMonth:"March", pYear:"2026", amount:48000, status:"Cleared", submittedDate:"2026-04-16T10:00:00", lastUpdated:"2026-04-19T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:600,amount:18500},{channel:"E-Wallet TnG",count:900,amount:22000},{channel:"DuitNow",count:300,amount:7500}], timeline:[tl("19 April 2026, 10:00 (GMT+8)","Cleared","DN-MA-MC-OC002 approved by LHDN. UUID: DN-OC2-NEW"), tl("16 April 2026, 10:00 (GMT+8)","Submitted","DN-MA-MC-OC002 sent to Taxilla")], irbmUUID:"DN-OC2-NEW"}),
+  inv({...MA_BRANDS.kargo, id:"CN-MA-MC-OC003", originalId:"MA-MC-OC003", prefix:"CN", period:"March 2026", pMonth:"March", pYear:"2026", amount:60000, status:"Rejected", submittedDate:"2026-04-22T10:00:00", lastUpdated:"2026-04-23T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Credit Card HSBC",count:2800,amount:45000},{channel:"E-Wallet Boost",count:950,amount:15000}], timeline:[tl("23 April 2026, 10:00 (GMT+8)","Rejected","CN-MA-MC-OC003 rejected by LHDN. Reason: Reference document not found"), tl("22 April 2026, 10:00 (GMT+8)","Submitted","CN-MA-MC-OC003 sent to Taxilla")]}),
+  // 4) Corrected → DN active (Submitted — in-flight; Retry Submission scenario)
+  inv({...MA_BRANDS.flights, id:"MA-MC-OC004", period:"March 2026", pMonth:"March", pYear:"2026", amount:48000, status:"Corrected", correctedBy:"DN-MA-MC-OC004", submittedDate:"2026-04-09T09:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"finops@acme.com", chargeBreakdown:MC_BREAKDOWN_A, timeline:[tl("25 April 2026, 11:00 (GMT+8)","Corrected","Original corrected by DN-MA-MC-OC004 (in flight)"), tl("10 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-OC4-OLD")]}),
+  inv({...MA_BRANDS.flights, id:"DN-MA-MC-OC004", originalId:"MA-MC-OC004", prefix:"DN", period:"March 2026", pMonth:"March", pYear:"2026", amount:56000, status:"Submitted", submittedDate:"2026-04-25T11:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"FPX",count:1024,amount:28000},{channel:"GrabPay",count:905,amount:23000},{channel:"Credit Card Maybank",count:50,amount:5000}], timeline:[tl("25 April 2026, 11:00 (GMT+8)","Submitted","DN-MA-MC-OC004 sent to Taxilla")]}),
 ];
+
+// Realtime — Malaysia Airlines
+const MA_REALTIME = [
+  // Submitted (3)
+  inv({...MA_BRANDS.flights, id:"MA-RT-S001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Submitted", submittedDate:"2026-04-25T09:30:00", lastUpdated:"2026-04-25T09:30:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("25 April 2026, 09:30 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-S002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Submitted", submittedDate:"2026-04-23T08:00:00", lastUpdated:"2026-04-23T08:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("23 April 2026, 08:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-S003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Submitted", submittedDate:"2026-04-20T08:00:00", lastUpdated:"2026-04-20T08:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("20 April 2026, 08:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+
+  // Cleared (3 in window — eligible for CN/DN)
+  inv({...MA_BRANDS.flights, id:"MA-RT-C001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Cleared", submittedDate:"2026-04-05T09:00:00", lastUpdated:"2026-04-07T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("7 April 2026, 08:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTCL-A1"), tl("5 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-RTCL-A1"}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-C002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Cleared", submittedDate:"2026-04-08T09:00:00", lastUpdated:"2026-04-10T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("10 April 2026, 08:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTCL-B2"), tl("8 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-RTCL-B2"}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-C003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Cleared", submittedDate:"2026-04-12T09:00:00", lastUpdated:"2026-04-14T08:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("14 April 2026, 08:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTCL-C3"), tl("12 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")], irbmUUID:"MA-RTCL-C3"}),
+
+  // Failed to Calculate (3)
+  inv({...MA_BRANDS.flights, id:"MA-RT-FC001", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-21T08:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("21 April 2026, 08:00 (GMT+8)","Failed to Calculate","Business not whitelisted")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-FC002", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-22T08:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("22 April 2026, 08:00 (GMT+8)","Failed to Calculate","Brand TIN missing")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-FC003", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-23T08:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("23 April 2026, 08:00 (GMT+8)","Failed to Calculate","Currency conversion failure")]}),
+
+  // Failed to Submit (3)
+  inv({...MA_BRANDS.flights, id:"MA-RT-FS001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-19T13:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("19 April 2026, 13:00 (GMT+8)","Failed to Submit","Network timeout to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-FS002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-22T08:30:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("22 April 2026, 08:30 (GMT+8)","Failed to Submit","Taxilla 502 Bad Gateway")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-FS003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Failed to Submit", submittedDate:null, lastUpdated:"2026-04-24T09:30:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("24 April 2026, 09:30 (GMT+8)","Failed to Submit","Taxilla certificate validation error")]}),
+
+  // Rejected (3)
+  inv({...MA_BRANDS.flights, id:"MA-RT-R001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Rejected", submittedDate:"2026-04-10T16:00:00", lastUpdated:"2026-04-11T09:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("11 April 2026, 09:00 (GMT+8)","Rejected","Invalid SST registration"), tl("10 April 2026, 16:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-R002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Rejected", submittedDate:"2026-04-12T10:00:00", lastUpdated:"2026-04-13T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("13 April 2026, 11:00 (GMT+8)","Rejected","TIN format invalid"), tl("12 April 2026, 10:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-R003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Rejected", submittedDate:"2026-04-15T09:00:00", lastUpdated:"2026-04-16T11:00:00", updatedBy:"system@taxilla", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("16 April 2026, 11:00 (GMT+8)","Rejected","Buyer SST mismatch"), tl("15 April 2026, 09:00 (GMT+8)","Submitted","e-Invoice sent to Taxilla")]}),
+
+  // Canceled (3) — was Cleared, then user clicked Cancel
+  inv({...MA_BRANDS.flights, id:"MA-RT-CN001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Canceled", submittedDate:"2026-04-08T08:00:00", lastUpdated:"2026-04-22T10:00:00", updatedBy:"john.doe@acme.com", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("22 April 2026, 10:00 (GMT+8)","Canceled","Cleared invoice canceled by john.doe@acme.com"), tl("9 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-CN002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Canceled", submittedDate:"2026-04-10T09:00:00", lastUpdated:"2026-04-23T11:00:00", updatedBy:"jane.lee@acme.com", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("23 April 2026, 11:00 (GMT+8)","Canceled","Cleared invoice canceled by jane.lee@acme.com"), tl("11 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-CN003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Canceled", submittedDate:"2026-04-12T09:00:00", lastUpdated:"2026-04-25T11:00:00", updatedBy:"emma@acme.com", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("25 April 2026, 11:00 (GMT+8)","Canceled","Cleared invoice canceled by emma@acme.com"), tl("13 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN")]}),
+
+  // Calculation Initiated (3)
+  inv({...MA_BRANDS.flights, id:"MA-RT-CI001", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T10:00:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("26 April 2026, 10:00 (GMT+8)","Calculation Initiated","Realtime trigger from streaming-transaction-fee")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-CI002", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T10:30:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("26 April 2026, 10:30 (GMT+8)","Calculation Initiated","Realtime trigger")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-CI003", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Calculation Initiated", submittedDate:null, lastUpdated:"2026-04-26T10:45:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("26 April 2026, 10:45 (GMT+8)","Calculation Initiated","Realtime trigger")]}),
+
+  // Corrected with active CN/DN
+  inv({...MA_BRANDS.flights, id:"MA-RT-OC001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Corrected", correctedBy:"CN-MA-RT-OC001", submittedDate:"2026-04-06T09:00:00", lastUpdated:"2026-04-19T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("19 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by CN-MA-RT-OC001"), tl("8 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTOC1-OLD")]}),
+  inv({...MA_BRANDS.firefly, id:"MA-RT-OC002", period:"April 2026", pMonth:"April", pYear:"2026", amount:82400, status:"Corrected", correctedBy:"DN-MA-RT-OC002", submittedDate:"2026-04-07T09:00:00", lastUpdated:"2026-04-21T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:RT_BREAKDOWN_B, timeline:[tl("21 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by DN-MA-RT-OC002"), tl("9 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTOC2-OLD")]}),
+  inv({...MA_BRANDS.kargo, id:"MA-RT-OC003", period:"April 2026", pMonth:"April", pYear:"2026", amount:46800, status:"Corrected", correctedBy:"CN-MA-RT-OC003", submittedDate:"2026-04-12T09:00:00", lastUpdated:"2026-04-25T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:RT_BREAKDOWN_C, timeline:[tl("25 April 2026, 10:00 (GMT+8)","Corrected","Original corrected by CN-MA-RT-OC003 (in flight)"), tl("14 April 2026, 09:00 (GMT+8)","Cleared","Approved by LHDN. UUID: MA-RTOC3-OLD")]}),
+
+  // Active correction rows (3)
+  inv({...MA_BRANDS.flights, id:"CN-MA-RT-OC001", originalId:"MA-RT-OC001", prefix:"CN", period:"April 2026", pMonth:"April", pYear:"2026", amount:55000, status:"Cleared", submittedDate:"2026-04-15T10:00:00", lastUpdated:"2026-04-19T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Subscription Fee",count:820,amount:32000},{channel:"Renewal Fee",count:340,amount:15000},{channel:"Upgrade Fee",count:150,amount:8000}], timeline:[tl("19 April 2026, 10:00 (GMT+8)","Cleared","CN-MA-RT-OC001 approved by LHDN. UUID: CN-RTOC1-NEW"), tl("15 April 2026, 10:00 (GMT+8)","Submitted","CN-MA-RT-OC001 sent to Taxilla")], irbmUUID:"CN-RTOC1-NEW"}),
+  inv({...MA_BRANDS.firefly, id:"DN-MA-RT-OC002", originalId:"MA-RT-OC002", prefix:"DN", period:"April 2026", pMonth:"April", pYear:"2026", amount:95000, status:"Cleared", submittedDate:"2026-04-17T10:00:00", lastUpdated:"2026-04-21T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"Subscription Fee",count:1200,amount:68000},{channel:"Upgrade Fee",count:280,amount:27000}], timeline:[tl("21 April 2026, 10:00 (GMT+8)","Cleared","DN-MA-RT-OC002 approved by LHDN. UUID: DN-RTOC2-NEW"), tl("17 April 2026, 10:00 (GMT+8)","Submitted","DN-MA-RT-OC002 sent to Taxilla")], irbmUUID:"DN-RTOC2-NEW"}),
+  inv({...MA_BRANDS.kargo, id:"CN-MA-RT-OC003", originalId:"MA-RT-OC003", prefix:"CN", period:"April 2026", pMonth:"April", pYear:"2026", amount:35000, status:"Submitted", submittedDate:"2026-04-25T10:00:00", lastUpdated:"2026-04-25T10:00:00", updatedBy:"finops@acme.com", chargeBreakdown:[{channel:"Renewal Fee",count:900,amount:33500},{channel:"MID Fee",count:12,amount:1500}], timeline:[tl("25 April 2026, 10:00 (GMT+8)","Submitted","CN-MA-RT-OC003 sent to Taxilla")]}),
+];
+
+// A few rows for other businesses to add some variety in the internal dashboard
+const OTHER_MONTHLY = [
+  inv({biz:"PETRONAS", bus:"BUS-293-58392017", brand:"PETRONAS KL", clint:"CLINT-293-00000001", id:"PT-MC-C001", period:"March 2026", pMonth:"March", pYear:"2026", amount:80155.55, status:"Cleared", submittedDate:"2026-04-02T10:00:00", lastUpdated:"2026-04-03T10:00:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:1024,amount:24000},{channel:"GrabPay",count:905,amount:19050.30},{channel:"ShopeePay",count:1061,amount:36055.25},{channel:"Cards Maybank",count:50,amount:1050.00}], timeline:[tl("3 April 2026, 10:00 (GMT+8)","Cleared","Approved by LHDN. UUID: PT-X1Y2"), tl("2 April 2026, 10:00 (GMT+8)","Submitted","sent to Taxilla")], irbmUUID:"PT-X1Y2"}),
+  inv({biz:"Wardah", bus:"BUS-846-37495820", brand:"Wardah", clint:"CLINT-846-37495821", id:"WD-MC-R001", period:"March 2026", pMonth:"March", pYear:"2026", amount:54050.50, status:"Rejected", submittedDate:"2026-04-15T14:30:00", lastUpdated:"2026-04-16T09:30:00", updatedBy:"system@taxilla", chargeBreakdown:[{channel:"FPX",count:900,amount:18050.50},{channel:"Credit Card Maybank",count:1800,amount:36000}], timeline:[tl("16 April 2026, 09:30 (GMT+8)","Rejected","TIN missing"), tl("15 April 2026, 14:30 (GMT+8)","Submitted","sent to Taxilla")]}),
+  inv({biz:"Air Asia", bus:"BUS-739-28563947", brand:"Air Asia", clint:"CLINT-739-01911934", id:"AA-MC-FC001", period:"April 2026", pMonth:"April", pYear:"2026", amount:null, status:"Failed to Calculate", submittedDate:null, lastUpdated:"2026-04-22T11:00:00", updatedBy:"system@scheduler", chargeBreakdown:[{channel:"Credit Card CIMB",count:1650,amount:32999.50},{channel:"DuitNow",count:420,amount:8400}], timeline:[tl("22 April 2026, 11:00 (GMT+8)","Failed to Calculate","Missing TIN")]}),
+];
+const OTHER_REALTIME = [
+  inv({biz:"TechServ Malaysia", bus:"BUS-401-71234501", brand:"TechServ Pro", clint:"CLINT-401-10000001", id:"TS-RT-S001", period:"April 2026", pMonth:"April", pYear:"2026", amount:70000, status:"Submitted", submittedDate:"2026-04-25T09:00:00", lastUpdated:"2026-04-25T09:30:00", updatedBy:"system@kafka", chargeBreakdown:RT_BREAKDOWN_A, timeline:[tl("25 April 2026, 09:30 (GMT+8)","Submitted","sent to Taxilla")]}),
+];
+
+const SEED_MONTHLY = [...MA_MONTHLY, ...OTHER_MONTHLY].sort((a,b)=>new Date(b.lastUpdated||0)-new Date(a.lastUpdated||0));
+const SEED_REALTIME = [...MA_REALTIME, ...OTHER_REALTIME].sort((a,b)=>new Date(b.lastUpdated||0)-new Date(a.lastUpdated||0));
+function seedMonthly() { return JSON.parse(JSON.stringify(SEED_MONTHLY)); }
+function seedRealtime() { return JSON.parse(JSON.stringify(SEED_REALTIME)); }
 
 // ── StatusBadge ──
 function StatusBadge({status,small}) {
@@ -187,8 +246,8 @@ function Modal({open,onClose,title,width,children}) {
   </div>;
 }
 
-// ── Phase 2 Kebab Menu ──
-function KebabMenu({invoice, onAction, mode, originalsCorrectedSet, allInvoices}) {
+// ── Kebab Menu (revised rules R1-R4) ──
+function KebabMenu({invoice, onAction, originalsCorrectedSet, allInvoices}) {
   const [open,setOpen]=useState(false);
   const ref=useRef(null);
   useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
@@ -197,46 +256,40 @@ function KebabMenu({invoice, onAction, mode, originalsCorrectedSet, allInvoices}
   const isOriginal = !invoice.prefix;
   const isCN = invoice.prefix==="CN";
   const isDN = invoice.prefix==="DN";
-  const monthlyAllowed = mode==="monthly"; // Realtime: per D1, no CN/DN
   actions.push({label:"View Details",icon:"👁",action:"detail"});
 
   if (isOriginal) {
     if (s==="Failed to Calculate") actions.push({label:"Retry Calculate",icon:"🔄",action:"retryCalc"});
     if (s==="Failed to Submit") actions.push({label:"Resend",icon:"↩",action:"resend"});
-    if (s==="Submitted" && !isSubmittedOver3Days(invoice)) actions.push({label:"Cancel",icon:"✕",action:"cancelInvoice"});
-
-    // Phase 2 — original eligible for CN/DN (Rejected, Cleared, Canceled within window AND not yet corrected)
-    if (monthlyAllowed && CORRECTABLE_ORIGINAL_STATUSES.includes(s) && correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id)) {
+    // R4 — Cancel only when Cleared
+    if (s==="Cleared") actions.push({label:"Cancel",icon:"✕",action:"cancelInvoice"});
+    // R1+R3 — CN/DN only on Cleared, in window, no existing correction
+    if (s==="Cleared" && correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id)) {
       actions.push({label:"Add Credit Note",icon:"➖",action:"addCN"});
       actions.push({label:"Add Debit Note",icon:"➕",action:"addDN"});
     }
     if (s==="Corrected" && invoice.correctedBy) {
       actions.push({label:"View Correction",icon:"🔗",action:"viewCorrection"});
     }
-  } else if (s !== "Superseded" && monthlyAllowed) {
-    // Correction row (CN/DN). Per B8: in-flight Submitted CN/DN cannot be canceled — but a Retry is allowed.
+  } else {
+    // Correction row (CN/DN) — R3: cannot create more CN/DN from here. R4: Cancel only on Cleared.
     if (s==="Submitted") actions.push({label:"Retry Submission",icon:"↻",action:"retrySubmit"});
     if (s==="Failed to Submit") actions.push({label:"Resend",icon:"↩",action:"resend"});
     if (s==="Failed to Calculate") actions.push({label:"Retry Calculate",icon:"🔄",action:"retryCalc"});
-
-    // Update / cross-convert: per C12 the 3-day rule does NOT apply; only end-of-month-from-original window does.
+    if (s==="Cleared") actions.push({label:"Cancel",icon:"✕",action:"cancelInvoice"});
+    // Update CN / Update DN only while still in failed state and within window
     const orig = allInvoices.find(i=>i.id===invoice.originalId);
     if (FAILED_CORRECTION_STATUSES.includes(s) && correctionEditWindowOpen(orig)) {
-      if (isCN) {
-        actions.push({label:"Update Credit Note",icon:"✎",action:"updateCN"});
-        actions.push({label:"Add Debit Note",icon:"➕",action:"convertToDN"});
-      }
-      if (isDN) {
-        actions.push({label:"Update Debit Note",icon:"✎",action:"updateDN"});
-        actions.push({label:"Add Credit Note",icon:"➖",action:"convertToCN"});
-      }
+      if (isCN) actions.push({label:"Update Credit Note",icon:"✎",action:"updateCN"});
+      if (isDN) actions.push({label:"Update Debit Note",icon:"✎",action:"updateDN"});
+      // No cross-conversion (per R3)
     }
   }
 
   return <div ref={ref} style={{position:"relative"}}>
     <button onClick={()=>setOpen(!open)} style={{background:open?"#f3f4f6":"#fff",border:"1px solid #e5e7eb",cursor:"pointer",fontSize:18,padding:"4px 10px",borderRadius:6,color:"#6b7280",lineHeight:1}}>⋮</button>
     {open&&<div style={{position:"absolute",right:0,top:"100%",marginTop:4,background:"#fff",borderRadius:8,boxShadow:"0 8px 30px rgba(0,0,0,0.15)",border:"1px solid #e5e7eb",minWidth:200,zIndex:100,overflow:"hidden",animation:"fadeIn 0.15s ease"}}>
-      {actions.map(a=><button key={a.action} onClick={()=>{setOpen(false);onAction(a.action,invoice)}} onMouseEnter={e=>e.currentTarget.style.background="#f9fafb"} onMouseLeave={e=>e.currentTarget.style.background="#fff"} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"11px 16px",border:"none",background:"#fff",cursor:"pointer",fontSize:13,color:a.action==="cancelInvoice"?"#dc2626":(a.action==="addCN"||a.action==="addDN"||a.action==="convertToCN"||a.action==="convertToDN"||a.action==="updateCN"||a.action==="updateDN"?"#6d28d9":"#374151"),textAlign:"left",fontWeight:(a.action==="cancelInvoice"||a.action.startsWith("add")||a.action.startsWith("convert")||a.action.startsWith("update"))?600:400}}>
+      {actions.map(a=><button key={a.action} onClick={()=>{setOpen(false);onAction(a.action,invoice)}} onMouseEnter={e=>e.currentTarget.style.background="#f9fafb"} onMouseLeave={e=>e.currentTarget.style.background="#fff"} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"11px 16px",border:"none",background:"#fff",cursor:"pointer",fontSize:13,color:a.action==="cancelInvoice"?"#dc2626":(a.action==="addCN"||a.action==="addDN"||a.action==="updateCN"||a.action==="updateDN"?"#6d28d9":"#374151"),textAlign:"left",fontWeight:(a.action==="cancelInvoice"||a.action.startsWith("add")||a.action.startsWith("update"))?600:400}}>
         <span style={{fontSize:14,width:18,textAlign:"center"}}>{a.icon}</span>{a.label}
       </button>)}
     </div>}
@@ -285,58 +338,51 @@ function DocThumbnail({invoice}) {
 function DetailModal({invoice,onClose,onAction,mode,readOnly,relatedRows,allInvoices,originalsCorrectedSet}) {
   if(!invoice) return null;
   const s=invoice.status;
-  const showDoc=["Submitted","Cleared","Rejected","Failed to Submit","Canceled","Corrected","Superseded"].includes(s);
+  const showDoc=["Submitted","Cleared","Rejected","Failed to Submit","Canceled","Corrected"].includes(s);
   const totalCount=invoice.chargeBreakdown.reduce((a,c)=>a+c.count,0);
   const totalAmt=invoice.chargeBreakdown.reduce((a,c)=>a+c.amount,0);
   const isOriginal = !invoice.prefix;
   const isCN = invoice.prefix==="CN";
   const isDN = invoice.prefix==="DN";
 
-  const canCancel=!readOnly && s==="Submitted" && isOriginal && !isSubmittedOver3Days(invoice);
-  const showResend=!readOnly && s==="Failed to Submit";
-  const showRetry=!readOnly && s==="Failed to Calculate";
-  const showRetrySubmit = !readOnly && !isOriginal && s==="Submitted"; // B8
+  // Per R4: Cancel only when Cleared, applies to Original and CN/DN
+  const canCancel = !readOnly && s==="Cleared";
+  const showResend = !readOnly && s==="Failed to Submit";
+  const showRetry = !readOnly && s==="Failed to Calculate";
+  const showRetrySubmit = !readOnly && !isOriginal && s==="Submitted";
 
-  const canCreateCorrection = !readOnly && mode==="monthly" && isOriginal && CORRECTABLE_ORIGINAL_STATUSES.includes(s) && correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id);
+  const canCreateCorrection = !readOnly && isOriginal && s==="Cleared" && correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id);
   const orig = isOriginal ? invoice : (allInvoices||[]).find(i=>i.id===invoice.originalId);
-  const correctableFromCN = !readOnly && mode==="monthly" && isCN && FAILED_CORRECTION_STATUSES.includes(s) && correctionEditWindowOpen(orig);
-  const correctableFromDN = !readOnly && mode==="monthly" && isDN && FAILED_CORRECTION_STATUSES.includes(s) && correctionEditWindowOpen(orig);
-  const windowExpired = !readOnly && isOriginal && CORRECTABLE_ORIGINAL_STATUSES.includes(s) && !correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id);
+  const correctableFromCN = !readOnly && isCN && FAILED_CORRECTION_STATUSES.includes(s) && correctionEditWindowOpen(orig);
+  const correctableFromDN = !readOnly && isDN && FAILED_CORRECTION_STATUSES.includes(s) && correctionEditWindowOpen(orig);
+  const windowExpired = !readOnly && isOriginal && s==="Cleared" && !correctionWindowOpenForOriginal(invoice) && !originalsCorrectedSet.has(invoice.id);
 
-  const timelineColors={"Cleared":"#0d9488","Submitted":"#16a34a","Failed to Submit":"#dc2626","Failed to Calculate":"#ef4444","Rejected":"#1f2937","Calculation Initiated":"#ea580c","Canceled":"#6b7280","Corrected":"#6d28d9","Superseded":"#9ca3af"};
+  const timelineColors={"Cleared":"#0d9488","Submitted":"#16a34a","Failed to Submit":"#dc2626","Failed to Calculate":"#ef4444","Rejected":"#1f2937","Calculation Initiated":"#ea580c","Canceled":"#6b7280","Corrected":"#6d28d9"};
   const titleHead = isCN?"Credit Note Details":(isDN?"Debit Note Details":"e-Invoice Details");
 
   return <Modal open={true} onClose={onClose} title={titleHead} width={showDoc?900:600}>
     <div style={{fontSize:14,fontWeight:700,color:"#111827",marginBottom:6}}>{invoice.id} — {invoice.brand} — {invoice.period}</div>
     {invoice.originalId && <div style={{fontSize:12,color:"#6b7280",marginBottom:14}}>Reference original e-Invoice: <a href="#" onClick={e=>{e.preventDefault();onAction("openOriginal",invoice)}} style={{color:"#dc2626",textDecoration:"underline",fontWeight:600}}>{invoice.originalId}</a></div>}
 
-    {/* Original-corrected banner — neutral wording per A8 */}
     {isOriginal && invoice.correctedBy && <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"12px 14px",marginBottom:16,fontSize:12,color:"#991b1b",display:"flex",alignItems:"center",gap:8}}>
       <span style={{fontSize:16}}>⚠</span>
-      <span>This e-Invoice has been corrected by <a href="#" onClick={e=>{e.preventDefault();onAction("openCorrection",invoice)}} style={{color:"#991b1b",textDecoration:"underline",fontWeight:700}}>{invoice.correctedBy}</a>. No further direct edits are allowed on the original.</span>
+      <span>This e-Invoice has been corrected by <a href="#" onClick={e=>{e.preventDefault();onAction("openCorrection",invoice)}} style={{color:"#991b1b",textDecoration:"underline",fontWeight:700}}>{invoice.correctedBy}</a>. Per R3, no additional CN or DN can be created on this original.</span>
     </div>}
 
-    {/* Phase 1 banners */}
-    {!readOnly && s==="Submitted" && isOriginal && !isSubmittedOver3Days(invoice)&&<div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#1e40af",display:"flex",alignItems:"center",gap:8}}>
-      <span style={{fontSize:16}}>ℹ</span> You can cancel submit within 3 days.
-    </div>}
-    {!readOnly && s==="Submitted" && isOriginal && isSubmittedOver3Days(invoice) && !invoice.correctedBy && <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#991b1b",display:"flex",alignItems:"center",gap:8}}>
-      <span style={{fontSize:16}}>⚠</span> This e-Invoice has been submitted for more than 3 days. Cancel window expired.
-    </div>}
-    {/* In-flight CN/DN cannot be canceled (B8) */}
     {!readOnly && !isOriginal && s==="Submitted" && <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#1e40af",display:"flex",alignItems:"center",gap:8}}>
       <span style={{fontSize:16}}>ℹ</span> This {isCN?"Credit Note":"Debit Note"} is in-flight at Taxilla and cannot be canceled. If status remains Submitted, you may use Retry Submission.
     </div>}
-    {/* Phase 2: eligible original */}
+
     {canCreateCorrection && <div style={{background:"#f5f3ff",border:"1px solid #ddd6fe",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#5b21b6",display:"flex",alignItems:"center",gap:8}}>
-      <span style={{fontSize:16}}>✎</span> This invoice is within the correction window (3 days after submitted, until end of {MONTHS[new Date(invoice.submittedDate).getMonth()]} {new Date(invoice.submittedDate).getFullYear()}). You may issue a Credit Note or Debit Note.
+      <span style={{fontSize:16}}>✎</span> This Cleared invoice is within the correction window (3 days after submitted, until end of {MONTHS[new Date(invoice.submittedDate).getMonth()]} {new Date(invoice.submittedDate).getFullYear()}). You may issue a Credit Note OR a Debit Note (one only — per R3).
     </div>}
-    {/* Phase 2: window expired */}
+
     {windowExpired && <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#991b1b",display:"flex",alignItems:"center",gap:8}}>
       <span style={{fontSize:16}}>⏱</span> Correction window expired (filing month closed). Contact tax operations for out-of-band reconciliation.
     </div>}
+
     {(correctableFromCN || correctableFromDN) && <div style={{background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#9a3412",display:"flex",alignItems:"center",gap:8}}>
-      <span style={{fontSize:16}}>↻</span> This {isCN?"Credit Note":"Debit Note"} can be updated in place, or converted to a {isCN?"Debit Note (creates new row, supersedes this one)":"Credit Note (creates new row, supersedes this one)"}.
+      <span style={{fontSize:16}}>↻</span> This {isCN?"Credit Note":"Debit Note"} can be updated in place to fix the values and resubmit to Taxilla.
     </div>}
 
     <div style={{display:"flex",gap:24}}>
@@ -402,9 +448,9 @@ function DetailModal({invoice,onClose,onAction,mode,readOnly,relatedRows,allInvo
       {showDoc&&<div style={{width:220,flexShrink:0}}>
         <DocThumbnail invoice={invoice}/>
         <button style={{width:"100%",marginTop:8,padding:"7px 0",border:"1px solid #d1d5db",borderRadius:6,background:"#fff",cursor:"pointer",fontSize:12,color:"#374151",fontWeight:500}}>⤢ View Document</button>
-        {(invoice.status==="Cleared"||invoice.status==="Corrected")&&<button style={{width:"100%",marginTop:6,padding:"7px 0",border:"none",borderRadius:6,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>⬇ Download PDF</button>}
+        {(invoice.status==="Cleared")&&<button style={{width:"100%",marginTop:6,padding:"7px 0",border:"none",borderRadius:6,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>⬇ Download PDF</button>}
         <div style={{marginTop:20}}>
-          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginBottom:10,textTransform:"uppercase",letterSpacing:0.5}}>Activity Log (per-invoice)</div>
+          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginBottom:10,textTransform:"uppercase",letterSpacing:0.5}}>Activity Log</div>
           {invoice.timeline.map((t,i)=><div key={i} style={{display:"flex",gap:10,marginBottom:14,position:"relative"}}>
             <div style={{display:"flex",flexDirection:"column",alignItems:"center",flexShrink:0,width:12}}>
               <div style={{width:10,height:10,borderRadius:999,background:timelineColors[t.status]||"#9ca3af",border:"2px solid #fff",boxShadow:"0 0 0 1px "+(timelineColors[t.status]||"#9ca3af"),flexShrink:0}}/>
@@ -421,7 +467,7 @@ function DetailModal({invoice,onClose,onAction,mode,readOnly,relatedRows,allInvo
     </div>
     <div style={{display:"flex",justifyContent:"flex-end",gap:12,marginTop:20,paddingTop:16,borderTop:"1px solid #e5e7eb",flexWrap:"wrap"}}>
       <button onClick={onClose} style={{padding:"10px 24px",border:"1px solid #d1d5db",borderRadius:8,background:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:"#374151"}}>Close</button>
-      {canCancel&&<button onClick={()=>onAction("cancelInvoice",invoice)} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Cancel e-Invoice</button>}
+      {canCancel&&<button onClick={()=>onAction("cancelInvoice",invoice)} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Cancel {isOriginal?"e-Invoice":(isCN?"Credit Note":"Debit Note")}</button>}
       {showResend&&<button onClick={()=>onAction("resend",invoice)} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Resend</button>}
       {showRetry&&<button onClick={()=>onAction("retryCalc",invoice)} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Retry Calculate</button>}
       {showRetrySubmit&&<button onClick={()=>onAction("retrySubmit",invoice)} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#1d4ed8",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>↻ Retry Submission</button>}
@@ -429,31 +475,22 @@ function DetailModal({invoice,onClose,onAction,mode,readOnly,relatedRows,allInvo
         <button onClick={()=>onAction("addCN",invoice)} style={{padding:"10px 18px",border:"1px solid #6d28d9",borderRadius:8,background:"#fff",color:"#6d28d9",cursor:"pointer",fontSize:13,fontWeight:600}}>➖ Add Credit Note</button>
         <button onClick={()=>onAction("addDN",invoice)} style={{padding:"10px 18px",border:"none",borderRadius:8,background:"#6d28d9",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>➕ Add Debit Note</button>
       </>}
-      {correctableFromCN && <>
-        <button onClick={()=>onAction("updateCN",invoice)} style={{padding:"10px 18px",border:"1px solid #6d28d9",borderRadius:8,background:"#fff",color:"#6d28d9",cursor:"pointer",fontSize:13,fontWeight:600}}>✎ Update Credit Note</button>
-        <button onClick={()=>onAction("convertToDN",invoice)} style={{padding:"10px 18px",border:"none",borderRadius:8,background:"#6d28d9",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>➕ Add Debit Note</button>
-      </>}
-      {correctableFromDN && <>
-        <button onClick={()=>onAction("updateDN",invoice)} style={{padding:"10px 18px",border:"1px solid #6d28d9",borderRadius:8,background:"#fff",color:"#6d28d9",cursor:"pointer",fontSize:13,fontWeight:600}}>✎ Update Debit Note</button>
-        <button onClick={()=>onAction("convertToCN",invoice)} style={{padding:"10px 18px",border:"none",borderRadius:8,background:"#6d28d9",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>➖ Add Credit Note</button>
-      </>}
+      {correctableFromCN && <button onClick={()=>onAction("updateCN",invoice)} style={{padding:"10px 18px",border:"1px solid #6d28d9",borderRadius:8,background:"#fff",color:"#6d28d9",cursor:"pointer",fontSize:13,fontWeight:600}}>✎ Update Credit Note</button>}
+      {correctableFromDN && <button onClick={()=>onAction("updateDN",invoice)} style={{padding:"10px 18px",border:"1px solid #6d28d9",borderRadius:8,background:"#fff",color:"#6d28d9",cursor:"pointer",fontSize:13,fontWeight:600}}>✎ Update Debit Note</button>}
     </div>
   </Modal>;
 }
 
-// ── Phase 2 Correction Dialog ──
-// Replace mode (A4). 2-decimal limit (C7). CN ≤ original; DN ≥ original (A6 — at-or-above).
-function CorrectionDialog({open, mode, kind, originalInvoice, currentInvoice, onClose, onSubmit}) {
+// ── Correction Dialog ──
+function CorrectionDialog({open, mode, kind, originalInvoice, currentInvoice, isRealtime, onClose, onSubmit}) {
   if(!open) return null;
   const original = originalInvoice.chargeBreakdown;
-  // Pre-fill: update mode → with current correction values; create mode → with original values (also for cross-conversion)
   const startVals = (mode==="update" && currentInvoice) ? currentInvoice.chargeBreakdown.map(c=>c.amount) : original.map(c=>c.amount);
   const [vals,setVals]=useState(()=>startVals.map(v=>String(v.toFixed(2))));
   const [reason,setReason]=useState("");
   useEffect(()=>{if(open) setVals(startVals.map(v=>String(v.toFixed(2))));},[open]);
 
   const setVal = (i,v) => {
-    // C7: max 2 decimal digits + only digits + optional decimal point
     if (v==="" || /^\d*(\.\d{0,2})?$/.test(v)) {
       const a=[...vals]; a[i]=v; setVals(a);
     }
@@ -472,6 +509,7 @@ function CorrectionDialog({open, mode, kind, originalInvoice, currentInvoice, on
   const canSubmit = !anyError && anyDiff;
   const headerColor = kind==="CN"?"#0d9488":"#6d28d9";
   const dialogTitle = `${mode==="update"?"Update":"Create"} ${kind==="CN"?"Credit Note":"Debit Note"}`;
+  const breakdownLabel = isRealtime ? "Transaction Type" : "Payment Channel";
 
   return <Modal open={true} onClose={onClose} title={dialogTitle} width={760}>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"6px 16px",marginBottom:14,fontSize:13}}>
@@ -480,11 +518,11 @@ function CorrectionDialog({open, mode, kind, originalInvoice, currentInvoice, on
       <div><div style={{fontSize:11,color:"#9ca3af"}}>Period</div><div style={{fontWeight:700,color:"#111827"}}>{originalInvoice.period}</div></div>
     </div>
     <div style={{background:"#f5f3ff",border:"1px solid #ddd6fe",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:12,color:"#5b21b6"}}>
-      <strong>Rule:</strong> {kind==="CN"?"Credit Note amounts must be at most the original per channel (downward correction).":"Debit Note amounts must be at-or-above the original per channel (upward correction)."} The corrected document will be submitted to Taxilla under the same business identity. Max 2 decimal places.
+      <strong>Rules:</strong> {kind==="CN"?"CN amounts must be at-most the original per "+breakdownLabel.toLowerCase()+" (downward correction).":"DN amounts must be at-or-above the original per "+breakdownLabel.toLowerCase()+" (upward correction)."} Max 2 decimal places. Per R3, this {kind==="CN"?"Credit":"Debit"} Note is the only correction that can be applied to this original.
     </div>
     <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
       <thead><tr style={{background:"#f8fafc",borderBottom:"2px solid #e5e7eb"}}>
-        <th style={{textAlign:"left",padding:"8px 10px",fontWeight:600,color:"#374151"}}>Payment Channel</th>
+        <th style={{textAlign:"left",padding:"8px 10px",fontWeight:600,color:"#374151"}}>{breakdownLabel}</th>
         <th style={{textAlign:"right",padding:"8px 10px",fontWeight:600,color:"#374151"}}>Original (MYR)</th>
         <th style={{textAlign:"right",padding:"8px 10px",fontWeight:600,color:"#374151"}}>Corrected (MYR)</th>
         <th style={{textAlign:"right",padding:"8px 10px",fontWeight:600,color:"#374151"}}>Difference</th>
@@ -541,8 +579,6 @@ function FilterModal({open,onClose,onApply,filters,statusList}) {
       <div><label style={ls}>Brand ID</label><input value={f.brandId} onChange={e=>upd("brandId",e.target.value)} placeholder="Enter brand ID" style={is}/></div>
       <div><label style={ls}>Period (Month)</label><select value={f.month} onChange={e=>upd("month",e.target.value)} style={{...is,appearance:"auto",cursor:"pointer"}}><option value="">Select</option>{MONTHS.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
       <div><label style={ls}>Period (Year)</label><select value={f.year} onChange={e=>upd("year",e.target.value)} style={{...is,appearance:"auto",cursor:"pointer"}}><option value="">Select</option>{["2024","2025","2026"].map(y=><option key={y} value={y}>{y}</option>)}</select></div>
-      <div><label style={ls}>Last Updated</label><input value={f.lastUpdated} onChange={e=>upd("lastUpdated",e.target.value)} placeholder="DD-MM-YYYY - DD-MM-YYYY" style={is}/></div>
-      <div><label style={ls}>Submitted Date</label><input value={f.submittedDate} onChange={e=>upd("submittedDate",e.target.value)} placeholder="DD-MM-YYYY - DD-MM-YYYY" style={is}/></div>
       <div><label style={ls}>Updated by</label><input value={f.updatedBy} onChange={e=>upd("updatedBy",e.target.value)} placeholder="Enter email" style={is}/></div>
     </div>
     {list.length>1 && <div style={{marginTop:20}}>
@@ -566,21 +602,26 @@ function ConfirmDialog({open,onClose,onConfirm,title,children,confirmLabel,showT
   return <Modal open={open} onClose={onClose} title={title} width={showTable?640:480}>
     <div style={{fontSize:13,color:"#374151",marginBottom:24}}>{children}</div>
     <div style={{display:"flex",justifyContent:"flex-end",gap:12}}>
-      <button onClick={onClose} style={{padding:"10px 24px",border:"1px solid #d1d5db",borderRadius:8,background:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:"#374151"}}>{confirmLabel==="Cancel e-Invoice"?"Keep e-Invoice":"Cancel"}</button>
+      <button onClick={onClose} style={{padding:"10px 24px",border:"1px solid #d1d5db",borderRadius:8,background:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:"#374151"}}>{confirmLabel && confirmLabel.toLowerCase().includes("cancel")?"Keep":"Cancel"}</button>
       <button onClick={onConfirm} style={{padding:"10px 24px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>{confirmLabel||"Confirm"}</button>
     </div>
   </Modal>;
 }
 
-// ── Internal Invoice Content (Phase 2) ──
-function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
-  const [invoices,setInvoices]=useState(()=>mode==="realtime"?seedRealtime():seed());
-  // Reset hook (Reset Data button)
-  useEffect(()=>{ setInvoices(mode==="realtime"?seedRealtime():seed()); },[resetSignal,mode]);
+// ── Internal Invoice Content ──
+function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal,sharedStore}) {
+  const [invoices,setInvoices]=useState(()=>mode==="realtime"?seedRealtime():seedMonthly());
+  useEffect(()=>{ setInvoices(mode==="realtime"?seedRealtime():seedMonthly()); },[resetSignal,mode]);
+  // Hook into shared external store so external view stays in sync with internal mutations
+  useEffect(()=>{
+    if (sharedStore && mode==="monthly") sharedStore.monthly=invoices;
+    if (sharedStore && mode==="realtime") sharedStore.realtime=invoices;
+  },[invoices,mode,sharedStore]);
+
   const [page,setPage]=useState(1);
   const [perPage,setPerPage]=useState(10);
   const [filterModalOpen,setFilterModalOpen]=useState(false);
-  const emptyFilters={bizName:"",bizId:"",brandName:"",brandId:"",month:"",year:"",lastUpdated:"",submittedDate:"",updatedBy:"",statuses:[]};
+  const emptyFilters={bizName:"",bizId:"",brandName:"",brandId:"",month:"",year:"",updatedBy:"",statuses:[]};
   const [filters,setFilters]=useState(emptyFilters);
   const [quickSearch,setQuickSearch]=useState("");
   const [quickSearchType,setQuickSearchType]=useState("e-Invoice ID");
@@ -590,7 +631,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
   const [confirmModal,setConfirmModal]=useState({open:false});
   const [correctionDialog,setCorrectionDialog]=useState({open:false});
 
-  const originalsCorrectedSet = useMemo(()=>new Set(invoices.filter(i=>i.prefix && i.status!=="Superseded").map(i=>i.originalId)),[invoices]);
+  const originalsCorrectedSet = useMemo(()=>new Set(invoices.filter(i=>i.prefix && i.status!=="Canceled").map(i=>i.originalId)),[invoices]);
 
   const activeChips=useMemo(()=>{
     const c=[];
@@ -643,8 +684,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
     if(!inv) return [];
     if(inv.prefix){
       const orig = findById(inv.originalId);
-      const sibling = invoices.find(i=>i.originalId===inv.originalId && i.id!==inv.id);
-      return [orig,sibling].filter(Boolean);
+      return orig ? [orig] : [];
     } else {
       return invoices.filter(i=>i.originalId===inv.id);
     }
@@ -661,17 +701,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
     const newAmount = values.reduce((a,n)=>a+n,0);
     const now = new Date().toISOString();
 
-    // Concurrency check (C5): for "create" or "convert", original must not already have a non-superseded correction (other than the one we're updating)
-    if (cd.mode==="create") {
-      const existing = invoices.find(i=>i.originalId===orig.id && i.status!=="Superseded" && i.id!==targetId);
-      if (existing && existing.id !== (cd.currentInvoice && cd.currentInvoice.id)) {
-        // Cross-conversion implicitly supersedes; this branch handles a true race only if the user opened the dialog before that correction existed.
-        // For simplicity in the prototype, allow cross-conversion to proceed.
-      }
-    }
-
     if(cd.mode==="update"){
-      // Update in-place — no new row created
       setInvoices(prev=>prev.map(i=>{
         if(i.id===cd.currentInvoice.id) {
           const newTimeline = [
@@ -684,29 +714,25 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
       }));
       notify("success",`${kind==="CN"?"Credit Note":"Debit Note"} ${targetId} updated and resent to Taxilla`);
     } else {
-      // Create — could be initial or cross-conversion
       setInvoices(prev=>{
+        // Concurrency check (per Round 1 C5): if original already corrected by an active CN/DN, refuse
+        const existingActive = prev.find(i=>i.originalId===orig.id && i.status!=="Canceled");
+        if (existingActive) {
+          notify("error","This invoice has already been corrected. Please refresh.");
+          return prev;
+        }
         let next = [...prev];
-        const priorCorrection = prev.find(i=>i.originalId===orig.id && i.status!=="Superseded");
-        if (priorCorrection && priorCorrection.id !== targetId) {
-          next = next.map(i=> i.id===priorCorrection.id ? {...i,status:"Superseded",lastUpdated:now,timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Superseded",desc:`Replaced by ${targetId}`},...i.timeline]} : i);
-        }
-        const existing = next.find(i=>i.id===targetId);
-        if (existing) {
-          next = next.map(i=> i.id===targetId ? {...i,amount:newAmount,chargeBreakdown:newBreakdown,status:"Submitted",lastUpdated:now,submittedDate:now,updatedBy:"finops@acme.com",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${targetId} re-issued. Reason: ${reason||"—"}`},...i.timeline]} : i);
-        } else {
-          const newRow = {
-            id:targetId, originalId:orig.id, prefix:kind,
-            biz:orig.biz, bus:orig.bus, brand:orig.brand, clint:orig.clint,
-            period:orig.period, pMonth:orig.pMonth, pYear:orig.pYear,
-            amount:newAmount, status:"Submitted",
-            submittedDate:now, lastUpdated:now,
-            updatedBy:"finops@acme.com", chargeBreakdown:newBreakdown,
-            timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${targetId} issued by FinOps. Sent to Taxilla. Reason: ${reason||"—"}`}]
-          };
-          next = [newRow,...next];
-        }
-        // Mark original as Corrected (A8 — neutral wording)
+        const newRow = {
+          id:targetId, originalId:orig.id, prefix:kind,
+          biz:orig.biz, bus:orig.bus, brand:orig.brand, clint:orig.clint,
+          period:orig.period, pMonth:orig.pMonth, pYear:orig.pYear,
+          amount:newAmount, status:"Submitted",
+          submittedDate:now, lastUpdated:now,
+          updatedBy:"finops@acme.com", chargeBreakdown:newBreakdown,
+          timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${targetId} issued by FinOps. Sent to Taxilla. Reason: ${reason||"—"}`}],
+          irbmUUID:null, irbmLink:null, correctedBy:null
+        };
+        next = [newRow,...next];
         next = next.map(i=> i.id===orig.id ? {...i,status:"Corrected",correctedBy:targetId,lastUpdated:now,updatedBy:"finops@acme.com",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Corrected",desc:`Original corrected by ${targetId}`},...i.timeline]} : i);
         return next.sort((a,b)=>new Date(b.lastUpdated||0)-new Date(a.lastUpdated||0));
       });
@@ -723,7 +749,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
       if(action==="retryCalc"){const t=i.chargeBreakdown.reduce((s,c)=>s+c.amount,0);return{...i,status:"Submitted",amount:t,lastUpdated:now,submittedDate:now,updatedBy:"system@taxilla",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${i.id} retried calculation`},...i.timeline]};}
       if(action==="resend") return{...i,status:"Submitted",lastUpdated:now,submittedDate:now,updatedBy:"system@taxilla",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${i.id} resent to Taxilla`},...i.timeline]};
       if(action==="retrySubmit") return{...i,status:"Submitted",lastUpdated:now,updatedBy:"system@taxilla",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Submitted",desc:`${i.id} retry submission triggered`},...i.timeline]};
-      if(action==="cancelInvoice") return{...i,status:"Canceled",lastUpdated:now,updatedBy:"john.doe@acme.com",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Canceled",desc:`${i.id} canceled`},...i.timeline]};
+      if(action==="cancelInvoice") return{...i,status:"Canceled",lastUpdated:now,updatedBy:"john.doe@acme.com",timeline:[{date:fmtDatetime(now)+" (GMT+8)",status:"Canceled",desc:`${i.id} canceled (was Cleared)`},...i.timeline]};
       return i;
     }));
   };
@@ -735,8 +761,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
     if(action==="openRelated"){setDetailInvoice(invoice); return;}
     if(action==="viewCorrection"){const target=invoices.find(i=>i.id===invoice.correctedBy); if(target) setDetailInvoice(target); return;}
     if(action==="addCN"||action==="addDN"){
-      // Concurrency / race check (C5): if invoice already corrected, refuse
-      if (invoice.correctedBy) { notify("error","This invoice has already been corrected. Please refresh."); return; }
+      if (originalsCorrectedSet.has(invoice.id)) { notify("error","This invoice has already been corrected. Please refresh."); return; }
       const kind = action==="addCN"?"CN":"DN";
       setCorrectionDialog({open:true, mode:"create", kind, originalInvoice:invoice, currentInvoice:null});
       return;
@@ -747,35 +772,31 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
       setCorrectionDialog({open:true, mode:"update", kind, originalInvoice:orig, currentInvoice:invoice});
       return;
     }
-    if(action==="convertToCN"||action==="convertToDN"){
-      const orig = invoices.find(i=>i.id===invoice.originalId);
-      const kind = action==="convertToCN"?"CN":"DN";
-      setCorrectionDialog({open:true, mode:"create", kind, originalInvoice:orig, currentInvoice:null});
-      return;
-    }
     if(action==="cancelInvoice"){
-      setConfirmModal({open:true,title:"Cancel e-Invoice?",confirmLabel:"Cancel e-Invoice",showTable:true,
+      const isOrig = !invoice.prefix;
+      const docLabel = isOrig?"e-Invoice":(invoice.prefix==="CN"?"Credit Note":"Debit Note");
+      setConfirmModal({open:true,title:`Cancel ${docLabel}?`,confirmLabel:`Cancel ${docLabel}`,showTable:true,
         content:<div>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}><span style={{fontSize:20}}>⚠️</span><span style={{fontSize:13,color:"#374151"}}>Review the details before proceeding.</span></div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}><span style={{fontSize:20}}>⚠️</span><span style={{fontSize:13,color:"#374151"}}>This will request Taxilla to cancel the document at IRBM.</span></div>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-            <thead><tr style={{background:"#f8fafc",borderBottom:"2px solid #e5e7eb"}}><th style={{padding:"8px 10px",textAlign:"left"}}>e-Invoice ID</th><th style={{padding:"8px 10px",textAlign:"left"}}>Business</th><th style={{padding:"8px 10px",textAlign:"left"}}>Brand</th><th style={{padding:"8px 10px",textAlign:"right"}}>Total Charge (MYR)</th></tr></thead>
+            <thead><tr style={{background:"#f8fafc",borderBottom:"2px solid #e5e7eb"}}><th style={{padding:"8px 10px",textAlign:"left"}}>Document ID</th><th style={{padding:"8px 10px",textAlign:"left"}}>Business</th><th style={{padding:"8px 10px",textAlign:"left"}}>Brand</th><th style={{padding:"8px 10px",textAlign:"right"}}>Total (MYR)</th></tr></thead>
             <tbody><tr><td style={{padding:"8px 10px"}}>{invoice.id}</td><td style={{padding:"8px 10px"}}>{invoice.biz}<br/><span style={{color:"#9ca3af",fontSize:11}}>{invoice.bus}</span></td><td style={{padding:"8px 10px"}}>{invoice.brand}<br/><span style={{color:"#9ca3af",fontSize:11}}>{invoice.clint}</span></td><td style={{padding:"8px 10px",textAlign:"right"}}>{fmtCurrency(invoice.amount)}</td></tr></tbody>
           </table>
         </div>,
-        onConfirm:()=>{performAction("cancelInvoice",invoice);notify("success",`E-Invoice ${invoice.id} canceled`);setConfirmModal({open:false});setDetailInvoice(null);}
+        onConfirm:()=>{performAction("cancelInvoice",invoice);notify("success",`${invoice.id} canceled`);setConfirmModal({open:false});setDetailInvoice(null);}
       });
       return;
     }
     const titles={retryCalc:"Retry Calculate",resend:"Resend",retrySubmit:"Retry Submission"};
     setConfirmModal({open:true,title:titles[action]||action,confirmLabel:titles[action],showTable:false,
       content:<div style={{background:"#f9fafb",padding:16,borderRadius:8,display:"grid",gridTemplateColumns:"120px 1fr",gap:"8px 14px",fontSize:13}}>
-        <span style={{color:"#6b7280"}}>e-Invoice ID</span><span style={{fontWeight:600}}>{invoice.id}</span>
+        <span style={{color:"#6b7280"}}>Document ID</span><span style={{fontWeight:600}}>{invoice.id}</span>
         <span style={{color:"#6b7280"}}>Business</span><span style={{fontWeight:600}}>{invoice.biz}</span>
         <span style={{color:"#6b7280"}}>Brand</span><span style={{fontWeight:600}}>{invoice.brand}</span>
         <span style={{color:"#6b7280"}}>Period</span><span style={{fontWeight:600}}>{invoice.period}</span>
         <span style={{color:"#6b7280"}}>Status</span><span><StatusBadge status={invoice.status}/></span>
       </div>,
-      onConfirm:()=>{performAction(action,invoice);notify("success",`${invoice.id}: action ${titles[action]} completed`);setConfirmModal({open:false});setDetailInvoice(null);}
+      onConfirm:()=>{performAction(action,invoice);notify("success",`${invoice.id}: ${titles[action]} completed`);setConfirmModal({open:false});setDetailInvoice(null);}
     });
   };
 
@@ -785,13 +806,10 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
         <div style={{padding:"28px 32px 0",background:"#fff"}}>
           <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:4}}>{pageTitle}</h1>
           <p style={{fontSize:13,color:"#9ca3af",marginBottom:16}}>{pageSubtitle}</p>
-          {mode==="monthly" && <div style={{background:"#f5f3ff",border:"1px solid #ddd6fe",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:12,color:"#5b21b6",display:"flex",alignItems:"center",gap:8}}>
+          <div style={{background:"#f5f3ff",border:"1px solid #ddd6fe",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:12,color:"#5b21b6",display:"flex",alignItems:"center",gap:8}}>
             <span style={{fontSize:16}}>✎</span>
-            <span><strong>Phase 2:</strong> When an original e-Invoice is <strong>Rejected, Cleared or Canceled</strong>, you may issue a Credit Note or Debit Note within the correction window: from 3 days after submitted-date until end of submitted-month. Existing CN/DN can be updated in place or cross-converted (creates a new row, supersedes the prior one).</span>
-          </div>}
-          {mode==="realtime" && <div style={{background:"#fef3c7",border:"1px solid #fde68a",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:12,color:"#92400e",display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:16}}>ℹ</span> <span>CN/DN corrections are <strong>out of scope for Realtime e-Invoice</strong> in Phase 2 (per scope D1). Only Phase 1 actions are available.</span>
-          </div>}
+            <span><strong>Phase 2 (revised):</strong> Credit Note / Debit Note are available on <strong>Cleared</strong> originals only. Each original supports at most one CN OR one DN. Cancel applies to any <strong>Cleared</strong> document (original, CN or DN). Realtime invoices are now in scope.</span>
+          </div>
           <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
             <div style={{display:"flex"}}>
               <select value={quickSearchType} onChange={e=>{setQuickSearchType(e.target.value);setQuickSearch("")}} style={{padding:"9px 12px",border:"1px solid #d1d5db",borderRadius:"6px 0 0 6px",fontSize:13,background:"#f9fafb",color:"#374151",cursor:"pointer",outline:"none",borderRight:"none"}}>
@@ -818,7 +836,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13,minWidth:1200}}>
               <thead><tr style={{borderBottom:"2px solid #e5e7eb"}}>
-                <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>e-Invoice ID</th>
+                <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Document ID</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Business</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Brand</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151",whiteSpace:"nowrap"}}>Period</th>
@@ -833,8 +851,8 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
                 {pageItems.length===0?<tr><td colSpan={10} style={{padding:60,textAlign:"center",color:"#9ca3af"}}>No invoices found</td></tr>
                 :pageItems.map(inv=>{
                   const isCorrection = !!inv.prefix;
-                  return <tr key={inv.id} style={{borderBottom:"1px solid #f3f4f6",background:isCorrection?(inv.prefix==="CN"?"#f0fdfa":"#faf5ff"):"transparent",opacity:inv.status==="Superseded"?0.55:1}}
-                    onMouseEnter={e=>{if(inv.status!=="Superseded")e.currentTarget.style.background=isCorrection?(inv.prefix==="CN"?"#ccfbf1":"#f3e8ff"):"#fafafa"}} onMouseLeave={e=>{e.currentTarget.style.background=isCorrection?(inv.prefix==="CN"?"#f0fdfa":"#faf5ff"):"transparent"}}>
+                  return <tr key={inv.id} style={{borderBottom:"1px solid #f3f4f6",background:isCorrection?(inv.prefix==="CN"?"#f0fdfa":"#faf5ff"):"transparent"}}
+                    onMouseEnter={e=>{e.currentTarget.style.background=isCorrection?(inv.prefix==="CN"?"#ccfbf1":"#f3e8ff"):"#fafafa"}} onMouseLeave={e=>{e.currentTarget.style.background=isCorrection?(inv.prefix==="CN"?"#f0fdfa":"#faf5ff"):"transparent"}}>
                     <td style={{padding:"14px 10px",fontWeight:500,color:"#111827"}}>
                       <div style={{display:"flex",alignItems:"center",gap:6}}>
                         {isCorrection && <span style={{padding:"2px 6px",borderRadius:4,background:inv.prefix==="CN"?"#0d9488":"#6d28d9",color:"#fff",fontSize:10,fontWeight:700}}>{inv.prefix}</span>}
@@ -852,7 +870,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
                     <td style={{padding:"14px 10px",color:"#6b7280",fontSize:12,whiteSpace:"nowrap"}}>{fmtDatetime(inv.lastUpdated)}</td>
                     <td style={{padding:"14px 10px",color:"#6b7280",fontSize:12}}>{inv.updatedBy||"-"}</td>
                     <td style={{padding:"14px 10px",position:"sticky",right:0,background:isCorrection?(inv.prefix==="CN"?"#f0fdfa":"#faf5ff"):"#fff",zIndex:1,boxShadow:"-4px 0 8px rgba(0,0,0,0.04)"}}>
-                      <KebabMenu invoice={inv} onAction={handleAction} mode={mode} originalsCorrectedSet={originalsCorrectedSet} allInvoices={invoices}/>
+                      <KebabMenu invoice={inv} onAction={handleAction} originalsCorrectedSet={originalsCorrectedSet} allInvoices={invoices}/>
                     </td>
                   </tr>;})}
               </tbody>
@@ -860,7 +878,7 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
           </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 0 0",borderTop:"3px solid #dc2626"}}>
             <select value={perPage} onChange={e=>setPerPage(Number(e.target.value))} style={{padding:"7px 12px",border:"1px solid #d1d5db",borderRadius:6,fontSize:13,color:"#374151",cursor:"pointer",outline:"none",background:"#fff"}}>
-              {[5,10,25].map(n=><option key={n} value={n}>{n} items per page</option>)}
+              {[5,10,25,50].map(n=><option key={n} value={n}>{n} items per page</option>)}
             </select>
             <div style={{display:"flex",alignItems:"center",gap:12,fontSize:13,color:"#6b7280"}}>
               <span>Showing {filtered.length===0?0:(page-1)*perPage+1} - {Math.min(page*perPage,filtered.length)} from {filtered.length} entries</span>
@@ -877,57 +895,90 @@ function InvoiceContent({pageTitle,pageSubtitle,notify,mode,resetSignal}) {
     <FilterModal open={filterModalOpen} onClose={()=>setFilterModalOpen(false)} onApply={setFilters} filters={filters}/>
     {detailInvoice&&<DetailModal invoice={detailInvoice} onClose={()=>setDetailInvoice(null)} onAction={(a,i)=>{if(a==="openOriginal"||a==="openCorrection"||a==="openRelated"||a==="viewCorrection"){handleAction(a,i);return;} setDetailInvoice(null);handleAction(a,i)}} mode={mode} relatedRows={relatedFor(detailInvoice)} allInvoices={invoices} originalsCorrectedSet={originalsCorrectedSet}/>}
     <ConfirmDialog open={confirmModal.open} onClose={()=>setConfirmModal({open:false})} onConfirm={confirmModal.onConfirm} title={confirmModal.title} confirmLabel={confirmModal.confirmLabel} showTable={confirmModal.showTable}>{confirmModal.content}</ConfirmDialog>
-    {correctionDialog.open && <CorrectionDialog open={true} mode={correctionDialog.mode} kind={correctionDialog.kind} originalInvoice={correctionDialog.originalInvoice} currentInvoice={correctionDialog.currentInvoice} onClose={closeCorrection} onSubmit={performCorrection}/>}
+    {correctionDialog.open && <CorrectionDialog open={true} mode={correctionDialog.mode} kind={correctionDialog.kind} originalInvoice={correctionDialog.originalInvoice} currentInvoice={correctionDialog.currentInvoice} isRealtime={mode==="realtime"} onClose={closeCorrection} onSubmit={performCorrection}/>}
   </>;
 }
 
-// ── External Dashboard Content (Phase 2) — per B5/D2: only Cleared and only show originals + Cleared CN/DN ──
-function ExternalDashboardContent({notify, resetSignal}) {
+// ── External Dashboard — Malaysia Airlines persona only, Cleared only ──
+function ExternalDashboardContent({notify, sharedStore, resetSignal}) {
+  // Pull the live state from the shared internal store so external view stays in sync
+  const [tick,setTick]=useState(0);
+  useEffect(()=>{ const t=setInterval(()=>setTick(x=>x+1),500); return ()=>clearInterval(t); },[]);
+  void tick; void resetSignal;
+
   const allInvoices = useMemo(()=>{
-    const m = seed().filter(i=>(i.status==="Cleared" || (i.prefix && i.status==="Cleared"))).map(i=>({...i,type:"Monthly Consolidated"}));
-    const r = seedRealtime().filter(i=>i.status==="Cleared").map(i=>({...i,type:"Realtime"}));
-    return [...m,...r].sort((a,b)=>new Date(b.lastUpdated)-new Date(a.lastUpdated));
-  },[resetSignal]);
+    const monthly = (sharedStore.monthly || seedMonthly())
+      .filter(i=>i.bus===EXTERNAL_BUSINESS_ID)
+      .filter(i=>i.status==="Cleared") // R5
+      .map(i=>({...i,type:"Monthly Consolidated"}));
+    const realtime = (sharedStore.realtime || seedRealtime())
+      .filter(i=>i.bus===EXTERNAL_BUSINESS_ID)
+      .filter(i=>i.status==="Cleared")
+      .map(i=>({...i,type:"Realtime"}));
+    return [...monthly,...realtime].sort((a,b)=>new Date(b.lastUpdated)-new Date(a.lastUpdated));
+  },[tick,resetSignal,sharedStore]);
+
   const [page,setPage]=useState(1);
   const [perPage,setPerPage]=useState(10);
-  const [filterModalOpen,setFilterModalOpen]=useState(false);
-  const emptyFilters={bizName:"",bizId:"",brandName:"",brandId:"",month:"",year:"",lastUpdated:"",submittedDate:"",updatedBy:"",statuses:[]};
-  const [filters,setFilters]=useState(emptyFilters);
   const [quickSearch,setQuickSearch]=useState("");
   const [quickSearchType,setQuickSearchType]=useState("e-Invoice ID");
   const [quickPeriod,setQuickPeriod]=useState("");
   const [quickType,setQuickType]=useState("");
+  const [quickPrefix,setQuickPrefix]=useState("");
   const [detailInvoice,setDetailInvoice]=useState(null);
 
   const filtered = useMemo(()=>allInvoices.filter(inv=>{
     if(quickSearch){
       const q=quickSearch.toLowerCase();
       if(quickSearchType==="e-Invoice ID"&&!inv.id.toLowerCase().includes(q)) return false;
-      if(quickSearchType==="Business Name"&&!inv.biz.toLowerCase().includes(q)) return false;
       if(quickSearchType==="Brand Name"&&!inv.brand.toLowerCase().includes(q)) return false;
     }
     if(quickPeriod&&inv.period!==quickPeriod) return false;
     if(quickType&&inv.type!==quickType) return false;
+    if(quickPrefix){
+      if(quickPrefix==="Original" && inv.prefix) return false;
+      if(quickPrefix==="Credit Note" && inv.prefix!=="CN") return false;
+      if(quickPrefix==="Debit Note" && inv.prefix!=="DN") return false;
+    }
     return true;
-  }),[allInvoices,quickSearch,quickSearchType,quickPeriod,quickType]);
+  }),[allInvoices,quickSearch,quickSearchType,quickPeriod,quickType,quickPrefix]);
 
   const totalPages=Math.max(1,Math.ceil(filtered.length/perPage));
   const pageItems=filtered.slice((page-1)*perPage,page*perPage);
   const periods=useMemo(()=>[...new Set(allInvoices.map(i=>i.period))].sort(),[allInvoices]);
 
+  const counts = useMemo(()=>{
+    const monthly = allInvoices.filter(i=>i.type==="Monthly Consolidated");
+    const realtime = allInvoices.filter(i=>i.type==="Realtime");
+    const cn = allInvoices.filter(i=>i.prefix==="CN");
+    const dn = allInvoices.filter(i=>i.prefix==="DN");
+    return {monthly:monthly.length, realtime:realtime.length, cn:cn.length, dn:dn.length, total:allInvoices.length};
+  },[allInvoices]);
+
   return <>
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{flex:1,overflow:"auto"}}>
         <div style={{padding:"28px 32px 0",background:"#fff"}}>
-          <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:4}}>e-Invoice Report</h1>
-          <p style={{fontSize:13,color:"#9ca3af",marginBottom:16}}>View, preview, and download cleared e-Invoices, Credit Notes, and Debit Notes</p>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+            <div>
+              <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:4}}>e-Invoice Report</h1>
+              <p style={{fontSize:13,color:"#9ca3af"}}>Logged in as Finance @ <strong>{EXTERNAL_BUSINESS_NAME}</strong> ({EXTERNAL_BUSINESS_ID})</p>
+            </div>
+            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+              <span style={{padding:"6px 12px",borderRadius:6,background:"#f0fdfa",border:"1px solid #99f6e4",fontSize:11,color:"#0d9488",fontWeight:600}}>Total Cleared: {counts.total}</span>
+              <span style={{padding:"6px 12px",borderRadius:6,background:"#dbeafe",border:"1px solid #bfdbfe",fontSize:11,color:"#1e40af",fontWeight:600}}>Monthly: {counts.monthly}</span>
+              <span style={{padding:"6px 12px",borderRadius:6,background:"#fef3c7",border:"1px solid #fde68a",fontSize:11,color:"#92400e",fontWeight:600}}>Realtime: {counts.realtime}</span>
+              <span style={{padding:"6px 12px",borderRadius:6,background:"#ccfbf1",border:"1px solid #5eead4",fontSize:11,color:"#0d9488",fontWeight:600}}>CN: {counts.cn}</span>
+              <span style={{padding:"6px 12px",borderRadius:6,background:"#f3e8ff",border:"1px solid #d8b4fe",fontSize:11,color:"#6d28d9",fontWeight:600}}>DN: {counts.dn}</span>
+            </div>
+          </div>
           <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#1e40af",display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:16}}>ℹ</span> Per scope, only documents that have been Cleared by IRBM are visible here. Each document (original / CN / DN) has its own PDF.
+            <span style={{fontSize:16}}>ℹ</span> Per the latest scope: only documents currently in <strong>Cleared</strong> status are visible. If FinOps cancels a document, it will disappear from this view automatically. Each document (original / CN / DN) has its own PDF.
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
             <div style={{display:"flex"}}>
               <select value={quickSearchType} onChange={e=>{setQuickSearchType(e.target.value);setQuickSearch("")}} style={{padding:"9px 12px",border:"1px solid #d1d5db",borderRadius:"6px 0 0 6px",fontSize:13,background:"#f9fafb",color:"#374151",cursor:"pointer",outline:"none",borderRight:"none"}}>
-                {["e-Invoice ID","Business Name","Brand Name"].map(t=><option key={t} value={t}>{t}</option>)}
+                {["e-Invoice ID","Brand Name"].map(t=><option key={t} value={t}>{t}</option>)}
               </select>
               <input value={quickSearch} onChange={e=>setQuickSearch(e.target.value)} placeholder={"Search "+quickSearchType.toLowerCase()} style={{padding:"9px 14px",border:"1px solid #d1d5db",borderRadius:"0 6px 6px 0",fontSize:13,outline:"none",color:"#374151",width:200}}/>
             </div>
@@ -936,6 +987,9 @@ function ExternalDashboardContent({notify, resetSignal}) {
             </select>
             <select value={quickType} onChange={e=>setQuickType(e.target.value)} style={{padding:"9px 12px",border:"1px solid #d1d5db",borderRadius:6,fontSize:13,color:quickType?"#374151":"#9ca3af",cursor:"pointer",outline:"none",minWidth:170,background:"#fff"}}>
               <option value="">Select Type</option><option value="Monthly Consolidated">Monthly Consolidated</option><option value="Realtime">Realtime</option>
+            </select>
+            <select value={quickPrefix} onChange={e=>setQuickPrefix(e.target.value)} style={{padding:"9px 12px",border:"1px solid #d1d5db",borderRadius:6,fontSize:13,color:quickPrefix?"#374151":"#9ca3af",cursor:"pointer",outline:"none",minWidth:160,background:"#fff"}}>
+              <option value="">Document Type</option><option value="Original">Original e-Invoice</option><option value="Credit Note">Credit Note</option><option value="Debit Note">Debit Note</option>
             </select>
             <button style={{padding:"9px 18px",border:"1px solid #dc2626",borderRadius:6,background:"#fff",color:"#dc2626",cursor:"pointer",fontSize:13,fontWeight:600}}>⬇ Export CSV</button>
           </div>
@@ -947,6 +1001,7 @@ function ExternalDashboardContent({notify, resetSignal}) {
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Document ID</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Document Type</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Brand</th>
+                <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Invoice Type</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Period</th>
                 <th style={{padding:"14px 10px",textAlign:"right",fontWeight:600,color:"#374151"}}>Total (MYR)</th>
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Status</th>
@@ -954,16 +1009,18 @@ function ExternalDashboardContent({notify, resetSignal}) {
                 <th style={{padding:"14px 10px",textAlign:"left",fontWeight:600,color:"#374151"}}>Action</th>
               </tr></thead>
               <tbody>
-                {pageItems.length===0?<tr><td colSpan={8} style={{padding:60,textAlign:"center",color:"#9ca3af"}}>No invoices found</td></tr>
+                {pageItems.length===0?<tr><td colSpan={9} style={{padding:60,textAlign:"center",color:"#9ca3af"}}>No invoices found</td></tr>
                 :pageItems.map(inv=><tr key={inv.id+inv.type} style={{borderBottom:"1px solid #f3f4f6"}}>
                   <td style={{padding:"14px 10px",fontWeight:500,color:"#111827"}}>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
                       {inv.prefix && <span style={{padding:"2px 6px",borderRadius:4,background:inv.prefix==="CN"?"#0d9488":"#6d28d9",color:"#fff",fontSize:10,fontWeight:700}}>{inv.prefix}</span>}
                       <span>{inv.id}</span>
                     </div>
+                    {inv.originalId && <div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>Refs: {inv.originalId}</div>}
                   </td>
                   <td style={{padding:"14px 10px",color:"#374151"}}>{inv.prefix==="CN"?"Credit Note":(inv.prefix==="DN"?"Debit Note":"e-Invoice")}</td>
                   <td style={{padding:"14px 10px"}}><div style={{color:"#111827",fontWeight:500}}>{inv.brand}</div><div style={{color:"#9ca3af",fontSize:11}}>{inv.clint}</div></td>
+                  <td style={{padding:"14px 10px"}}><span style={{padding:"3px 8px",borderRadius:4,background:inv.type==="Realtime"?"#fef3c7":"#dbeafe",color:inv.type==="Realtime"?"#92400e":"#1e40af",fontSize:11,fontWeight:600}}>{inv.type}</span></td>
                   <td style={{padding:"14px 10px",color:"#374151"}}>{inv.period}</td>
                   <td style={{padding:"14px 10px",textAlign:"right",fontWeight:500,color:"#111827"}}>{fmtCurrency(inv.amount)}</td>
                   <td style={{padding:"14px 10px"}}><StatusBadge status={inv.status}/></td>
@@ -978,7 +1035,7 @@ function ExternalDashboardContent({notify, resetSignal}) {
           </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 0 0",borderTop:"3px solid #dc2626"}}>
             <select value={perPage} onChange={e=>setPerPage(Number(e.target.value))} style={{padding:"7px 12px",border:"1px solid #d1d5db",borderRadius:6,fontSize:13,color:"#374151",cursor:"pointer",outline:"none",background:"#fff"}}>
-              {[5,10,25].map(n=><option key={n} value={n}>{n} items per page</option>)}
+              {[5,10,25,50].map(n=><option key={n} value={n}>{n} items per page</option>)}
             </select>
             <div style={{display:"flex",alignItems:"center",gap:12,fontSize:13,color:"#6b7280"}}>
               <span>Showing {filtered.length===0?0:(page-1)*perPage+1} - {Math.min(page*perPage,filtered.length)} from {filtered.length} entries</span>
@@ -992,12 +1049,11 @@ function ExternalDashboardContent({notify, resetSignal}) {
         </div>
       </div>
     </div>
-    <FilterModal open={filterModalOpen} onClose={()=>setFilterModalOpen(false)} onApply={setFilters} filters={filters} statusList={[]}/>
     {detailInvoice&&<DetailModal invoice={detailInvoice} onClose={()=>setDetailInvoice(null)} onAction={()=>{}} mode={detailInvoice.type==="Realtime"?"realtime":"monthly"} readOnly={true}/>}
   </>;
 }
 
-// ── Reset Data Button (PROTOTYPE-ONLY UTILITY — not in PID/spec) ──
+// ── Reset Data Button (prototype-only) ──
 function ResetDataButton({onReset}) {
   return <button onClick={onReset} title="Reset prototype dummy data to original seed (prototype-only utility)"
     style={{padding:"8px 14px",border:"1px solid #f97316",borderRadius:8,background:"#fff7ed",color:"#9a3412",cursor:"pointer",fontSize:12,fontWeight:600,display:"flex",alignItems:"center",gap:6}}>
@@ -1006,11 +1062,11 @@ function ResetDataButton({onReset}) {
 }
 
 // ── Internal Dashboard ──
-function InternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
+function InternalDashboard({notify,onSwitchView,resetSignal,onReset,sharedStore}) {
   const [monitoringOpen,setMonitoringOpen]=useState(true);
   const [sidebarOpen,setSidebarOpen]=useState(true);
   const [activePage,setActivePage]=useState("monthly");
-  const pages={monthly:{title:"Monthly Consolidated e-Invoice",subtitle:"Monitor monthly consolidated e-Invoice and issue corrections (Phase 2)"},realtime:{title:"Realtime e-Invoice",subtitle:"Monitor realtime e-Invoice submissions"}};
+  const pages={monthly:{title:"Monthly Consolidated e-Invoice",subtitle:"Monitor monthly consolidated e-Invoice and issue corrections (Phase 2 — revised)"},realtime:{title:"Realtime e-Invoice",subtitle:"Monitor realtime e-Invoice and issue corrections (Phase 2 — revised)"}};
   const subMenuStyle=(key)=>({padding:"9px 16px",fontSize:13,cursor:"pointer",borderRadius:"0 4px 4px 0",marginBottom:2,
     ...(activePage===key?{color:"#dc2626",fontWeight:600,borderLeft:"3px solid #dc2626",background:"#fef2f2"}:{color:"#6b7280",fontWeight:400,borderLeft:"3px solid transparent",background:"transparent"})});
   return <div style={{display:"flex",height:"100vh",background:"#f5f5f5",overflow:"hidden"}}>
@@ -1023,7 +1079,7 @@ function InternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
       <div style={{padding:"12px 20px",borderBottom:"1px solid #f3f4f6"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <div style={{width:28,height:28,borderRadius:999,background:"#fee2e2",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#dc2626"}}>D</div>
-          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>DOKU MY</div><div style={{fontSize:11,color:"#9ca3af"}}>Internal · Phase 2</div></div>
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>DOKU MY</div><div style={{fontSize:11,color:"#9ca3af"}}>Internal · Phase 2 (revised)</div></div>
           <span onClick={onSwitchView} style={{color:"#dc2626",fontSize:11,cursor:"pointer",fontWeight:600}}>Switch</span>
         </div>
       </div>
@@ -1049,12 +1105,12 @@ function InternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
       <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",padding:"10px 32px 0",background:"transparent"}}>
         <ResetDataButton onReset={onReset}/>
       </div>
-      <InvoiceContent key={activePage} pageTitle={pages[activePage].title} pageSubtitle={pages[activePage].subtitle} notify={notify} mode={activePage==="realtime"?"realtime":"monthly"} resetSignal={resetSignal}/>
+      <InvoiceContent key={activePage} pageTitle={pages[activePage].title} pageSubtitle={pages[activePage].subtitle} notify={notify} mode={activePage==="realtime"?"realtime":"monthly"} resetSignal={resetSignal} sharedStore={sharedStore}/>
     </div>
   </div>;
 }
 
-function ExternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
+function ExternalDashboard({notify,onSwitchView,resetSignal,onReset,sharedStore}) {
   const [reportOpen,setReportOpen]=useState(true);
   const [sidebarOpen,setSidebarOpen]=useState(true);
   return <div style={{display:"flex",height:"100vh",background:"#f5f5f5",overflow:"hidden"}}>
@@ -1066,8 +1122,8 @@ function ExternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
       {sidebarOpen&&<>
       <div style={{padding:"12px 20px",borderBottom:"1px solid #f3f4f6"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <div style={{width:28,height:28,borderRadius:999,background:"#dbeafe",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#1e40af"}}>P</div>
-          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>PETRONAS</div><div style={{fontSize:11,color:"#9ca3af"}}>External · Phase 2</div></div>
+          <div style={{width:28,height:28,borderRadius:999,background:"#dbeafe",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#1e40af"}}>M</div>
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>{EXTERNAL_BUSINESS_NAME}</div><div style={{fontSize:11,color:"#9ca3af"}}>External · Phase 2</div></div>
           <span onClick={onSwitchView} style={{color:"#dc2626",fontSize:11,cursor:"pointer",fontWeight:600}}>Switch</span>
         </div>
       </div>
@@ -1082,36 +1138,37 @@ function ExternalDashboard({notify,onSwitchView,resetSignal,onReset}) {
         </div>
       </nav>
       <div style={{padding:"14px 20px",borderTop:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>Aini Tan</div><div style={{fontSize:11,color:"#9ca3af"}}>Finance @ PETRONAS</div></div>
+        <div><div style={{fontSize:13,fontWeight:700,color:"#111827"}}>Aini Tan</div><div style={{fontSize:11,color:"#9ca3af"}}>Finance @ {EXTERNAL_BUSINESS_NAME}</div></div>
       </div>
       </>}
     </div>
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",padding:"10px 32px 0",background:"transparent"}}>
+      <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",padding:"10px 32px 0",background:"transparent",gap:12}}>
+        <span style={{fontSize:11,color:"#9ca3af"}}>External view auto-syncs with internal mutations</span>
         <ResetDataButton onReset={onReset}/>
       </div>
-      <ExternalDashboardContent notify={notify} resetSignal={resetSignal}/>
+      <ExternalDashboardContent notify={notify} sharedStore={sharedStore} resetSignal={resetSignal}/>
     </div>
   </div>;
 }
 
 function ViewSelector({onPick}) {
   return <div style={{height:"100vh",width:"100vw",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg, #0f172a 0%, #1e293b 40%, #0f172a 100%)",fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"}}>
-    <div style={{background:"#fff",borderRadius:16,padding:"40px 44px",width:580,boxShadow:"0 25px 60px rgba(0,0,0,0.4)"}}>
+    <div style={{background:"#fff",borderRadius:16,padding:"40px 44px",width:620,boxShadow:"0 25px 60px rgba(0,0,0,0.4)"}}>
       <h1 style={{fontSize:22,fontWeight:700,color:"#111827",marginBottom:8,textAlign:"center"}}>Select Dashboard View</h1>
-      <p style={{fontSize:13,color:"#9ca3af",marginBottom:6,textAlign:"center"}}>Phase 2 prototype (revised) — confirmed business rules</p>
-      <p style={{fontSize:11,color:"#9ca3af",marginBottom:32,textAlign:"center"}}>Try Internal → Monthly Consolidated → use the kebab menu on Cleared / Rejected / Canceled invoices</p>
+      <p style={{fontSize:13,color:"#9ca3af",marginBottom:6,textAlign:"center"}}>Phase 2 prototype (revised) — CN/DN on Cleared only, Monthly + Realtime in scope</p>
+      <p style={{fontSize:11,color:"#9ca3af",marginBottom:32,textAlign:"center"}}>Internal & External views share the same in-memory store. When FinOps cancels a Cleared document, the External view drops it within 0.5s.</p>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
         <div onClick={()=>onPick("internal")} style={{padding:24,border:"2px solid #e5e7eb",borderRadius:12,cursor:"pointer",transition:"all 0.2s"}} onMouseEnter={e=>{e.currentTarget.style.borderColor="#6d28d9";e.currentTarget.style.transform="translateY(-2px)"}} onMouseLeave={e=>{e.currentTarget.style.borderColor="#e5e7eb";e.currentTarget.style.transform="translateY(0)"}}>
           <div style={{fontSize:32,marginBottom:12}}>🏢</div>
           <div style={{fontSize:15,fontWeight:700,color:"#111827",marginBottom:6}}>Internal Dashboard</div>
-          <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>Issue, update and cross-convert Credit Notes / Debit Notes against eligible Monthly Consolidated invoices.</div>
+          <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>FinOps. Issue / update CN/DN, cancel Cleared documents, monitor Monthly + Realtime.</div>
           <div style={{marginTop:14,fontSize:11,color:"#6d28d9",fontWeight:600}}>Open Internal →</div>
         </div>
         <div onClick={()=>onPick("external")} style={{padding:24,border:"2px solid #e5e7eb",borderRadius:12,cursor:"pointer",transition:"all 0.2s"}} onMouseEnter={e=>{e.currentTarget.style.borderColor="#6d28d9";e.currentTarget.style.transform="translateY(-2px)"}} onMouseLeave={e=>{e.currentTarget.style.borderColor="#e5e7eb";e.currentTarget.style.transform="translateY(0)"}}>
-          <div style={{fontSize:32,marginBottom:12}}>🛍️</div>
-          <div style={{fontSize:15,fontWeight:700,color:"#111827",marginBottom:6}}>External Dashboard</div>
-          <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>Merchant view: Cleared originals + Cleared CN/DN, each with its own PDF download.</div>
+          <div style={{fontSize:32,marginBottom:12}}>✈️</div>
+          <div style={{fontSize:15,fontWeight:700,color:"#111827",marginBottom:6}}>External — {EXTERNAL_BUSINESS_NAME}</div>
+          <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5}}>Persona: Finance @ {EXTERNAL_BUSINESS_NAME} ({EXTERNAL_BUSINESS_ID}). Sees only Cleared documents.</div>
           <div style={{marginTop:14,fontSize:11,color:"#6d28d9",fontWeight:600}}>Open External →</div>
         </div>
       </div>
@@ -1123,8 +1180,10 @@ function LHDNApp() {
   const [view,setView]=useState(null);
   const [notifications,setNotifications]=useState([]);
   const [resetSignal,setResetSignal]=useState(0);
+  // Shared store mutated by InternalDashboard's InvoiceContent; read by ExternalDashboardContent
+  const sharedStoreRef = useRef({monthly:null, realtime:null});
   const notify=useCallback((type,message)=>{const id=Date.now()+Math.random();setNotifications(p=>[...p,{id,type,message}]);setTimeout(()=>setNotifications(p=>p.filter(n=>n.id!==id)),4000)},[]);
-  const onReset = useCallback(()=>{ setResetSignal(s=>s+1); notify("info","Prototype data reset to original seed."); },[notify]);
+  const onReset = useCallback(()=>{ sharedStoreRef.current.monthly=null; sharedStoreRef.current.realtime=null; setResetSignal(s=>s+1); notify("info","Prototype data reset to original seed."); },[notify]);
 
   return <div style={{fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",height:"100vh",overflow:"hidden"}}>
     <style>{`
@@ -1137,8 +1196,8 @@ function LHDNApp() {
     `}</style>
     <Notifications items={notifications} onDismiss={id=>setNotifications(p=>p.filter(n=>n.id!==id))}/>
     {view===null && <ViewSelector onPick={setView}/>}
-    {view==="internal" && <InternalDashboard notify={notify} onSwitchView={()=>setView(null)} resetSignal={resetSignal} onReset={onReset}/>}
-    {view==="external" && <ExternalDashboard notify={notify} onSwitchView={()=>setView(null)} resetSignal={resetSignal} onReset={onReset}/>}
+    {view==="internal" && <InternalDashboard notify={notify} onSwitchView={()=>setView(null)} resetSignal={resetSignal} onReset={onReset} sharedStore={sharedStoreRef.current}/>}
+    {view==="external" && <ExternalDashboard notify={notify} onSwitchView={()=>setView(null)} resetSignal={resetSignal} onReset={onReset} sharedStore={sharedStoreRef.current}/>}
   </div>;
 }
 
@@ -1158,7 +1217,7 @@ function PasswordGate() {
           <div style={{width:56,height:56,background:"#dc2626",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:800,fontSize:22,boxShadow:"0 4px 16px rgba(220,38,38,0.35)"}}>RU</div>
         </div>
         <h1 style={{textAlign:"center",fontSize:20,fontWeight:700,color:"#111827",marginBottom:6}}>LHDN e-Invoice System</h1>
-        <p style={{textAlign:"center",fontSize:13,color:"#6d28d9",marginBottom:8,fontWeight:600}}>Phase 2 — Internal Correction (CN/DN, revised)</p>
+        <p style={{textAlign:"center",fontSize:13,color:"#6d28d9",marginBottom:8,fontWeight:600}}>Phase 2 — Cleared-only Correction (Monthly + Realtime)</p>
         <p style={{textAlign:"center",fontSize:11,color:"#9ca3af",marginBottom:32}}>Enter password to access dashboards</p>
         <div style={{marginBottom:20}}>
           <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:6}}>Password</label>
